@@ -50,6 +50,8 @@ export const STATUS_MAP = {
     UNDER_TREATMENT: { label: 'Under Treatment', cls: 'bg-green-500/15 text-green-400 border-green-500/30', dot: 'bg-green-400' },
     CLOSED: { label: 'Closed', cls: 'bg-gray-500/15 text-gray-300 border-gray-500/30', dot: 'bg-gray-400' },
     CANCELLED: { label: 'Cancelled', cls: 'bg-gray-500/15 text-gray-400 border-gray-500/30', dot: 'bg-gray-500' },
+    DOCTOR_NOTIFIED: { label: 'Doctor Notified', cls: 'bg-blue-500/15 text-blue-400 border-blue-500/30', dot: 'bg-blue-400' },
+    DOCTOR_HANDLING: { label: 'Doctor Handling', cls: 'bg-red-500/15 text-red-400 border-red-500/30', dot: 'bg-red-400' },
 };
 
 export const IncidentBadge = ({ type }) => {

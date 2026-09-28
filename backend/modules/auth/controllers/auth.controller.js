@@ -199,6 +199,24 @@ const updateProfile = async (req, res, next) => {
       dob,
       bio
     } = req.body;
+
+    const rawSoundEnabled =
+      req.body["notificationPreferences.soundEnabled"] ??
+      req.body.notificationPreferences?.soundEnabled;
+    const rawSoundVolume =
+      req.body["notificationPreferences.soundVolume"] ??
+      req.body.notificationPreferences?.soundVolume;
+
+    const notificationPreferences =
+      rawSoundEnabled !== undefined || rawSoundVolume !== undefined
+        ? {
+            soundEnabled:
+              rawSoundEnabled !== undefined ? rawSoundEnabled : undefined,
+            soundVolume:
+              rawSoundVolume !== undefined ? rawSoundVolume : undefined,
+          }
+        : undefined;
+
     const userId = req.user.id;
     let profileImage;
     let signature;
@@ -258,7 +276,8 @@ const updateProfile = async (req, res, next) => {
       bloodGroup,
       guardianNumber,
       dob,
-      bio
+      bio,
+      notificationPreferences,
     });
 
     await logAction({

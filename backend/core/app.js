@@ -20,6 +20,7 @@ const emergencyRoutes = require("../modules/emergency");
 const errorHandler = require("../middleware/errorHandler");
 const { limiter, securityHeaders } = require("../middleware/security");
 const requestLogger = require("../middleware/requestLogger");
+const authMiddleware = require("../middleware/authMiddleware");
 
 const app = express();
 
@@ -48,11 +49,29 @@ app.use(express.json());
 
 // Serve static files from uploads directory
 // Using __dirname ensures we find the uploads folder relative to this file
-app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
-app.use("/backend/uploads", express.static(path.join(__dirname, "../uploads"))); // Fallback
+const fs = require("fs");
+const uploadsDir = path.join(__dirname, "../uploads");
+const notificationUploadsDir = path.join(uploadsDir, "notifications");
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+if (!fs.existsSync(notificationUploadsDir)) fs.mkdirSync(notificationUploadsDir, { recursive: true });
+
+app.use("/uploads", express.static(uploadsDir));
+app.use("/backend/uploads", express.static(uploadsDir)); // Fallback
+
+// Global Mongoose settings — disable command buffering so queries fail fast
+// instead of hanging for 10s when MongoDB is temporarily disconnected
+const mongoose = require("mongoose");
+mongoose.set("bufferCommands", false);
 
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok" });
+  const dbState = mongoose.connection.readyState;
+  const dbStatus = { 0: "disconnected", 1: "connected", 2: "connecting", 3: "disconnecting" }[dbState] || "unknown";
+  res.json({
+    status: "ok",
+    db: dbStatus,
+    dbState,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 console.log("Loading auth routes at /api/auth");
@@ -79,6 +98,9 @@ console.log("Loading AI diagnosis routes at /api/ai/diagnosis");
 app.use("/api/ai/diagnosis", diagnosisRoutes);
 console.log("Loading AI diet routes at /api/ai/diet");
 app.use("/api/ai/diet", dietRoutes);
+console.log("Loading Medical Report Track AI diet routes at /api/track");
+const trackRoutes = require("../modules/track/track.routes");
+app.use("/api/track", trackRoutes);
 console.log("Loading AI reminder routes at /api/ai/reminder");
 app.use("/api/ai/reminder", reminderRoutes);
 console.log("Loading Audit routes at /api/audit");
@@ -113,6 +135,21 @@ app.use("/api/lab", labRoutes);
 console.log("Loading universal search routes at /api/search");
 const searchRoutes = require("../modules/search/routes");
 app.use("/api/search", searchRoutes);
+
+console.log("Loading notification sound routes at /api/notification-sounds");
+const { Router } = require("express");
+const {
+  getSoundEventMap,
+  resolveSoundForEvent,
+} = require("../modules/notifications/sound.controller");
+const notificationSoundPublicRouter = Router();
+notificationSoundPublicRouter.get("/event-map", authMiddleware, getSoundEventMap);
+notificationSoundPublicRouter.get(
+  "/by-event/:eventType",
+  authMiddleware,
+  resolveSoundForEvent
+);
+app.use("/api/notification-sounds", notificationSoundPublicRouter);
 
 console.log("App initialized - all routes loaded");
 

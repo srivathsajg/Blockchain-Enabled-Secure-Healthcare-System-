@@ -111,6 +111,29 @@ const start = async () => {
       console.log(`Socket ${socket.id} joined hospital tracking: ${hospitalName}`);
     });
 
+    // Real-time Ambulance Location Tracking & Automatic Arrival
+    socket.on("update-ambulance-location", async (data) => {
+      try {
+        const { emergencyCaseId, caseId, coords, ambulanceId, userId } = data || {};
+        const targetId = emergencyCaseId || caseId;
+        const targetUserId = ambulanceId || userId;
+
+        if (!targetId || !coords || typeof coords.latitude !== 'number' || typeof coords.longitude !== 'number') {
+          return;
+        }
+
+        const { updateAmbulanceLocation } = require("../modules/emergency/service");
+        await updateAmbulanceLocation({
+          user: { id: targetUserId, role: "ambulance" },
+          id: targetId,
+          coords,
+          ipAddress: "socket-connection",
+        });
+      } catch (locationErr) {
+        console.warn("Real-time ambulance location socket update error:", locationErr.message);
+      }
+    });
+
     socket.on("disconnect", () => {
       console.log("Disconnected:", socket.id);
     });

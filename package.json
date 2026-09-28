@@ -3,7 +3,14 @@
   "private": true,
   "scripts": {
     "dev": "npm --prefix backend run dev",
-    "start": "npm --prefix backend start"
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "dev:diet-ai": "uvicorn app.main:app --host 0.0.0.0 --port 8000 --app-dir diet_ai",
+    "start": "npm --prefix backend start",
+    "build:frontend": "npm --prefix frontend run build",
+    "seed": "npm --prefix backend run seed",
+    "test": "node tests/verify-doctor-emergency-transitions.test.js",
+    "test:diet-ai": "python -m pytest diet_ai/tests/ -v"
   },
   "dependencies": {
     "@pinata/sdk": "^2.1.0"

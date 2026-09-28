@@ -23,10 +23,13 @@ const {
     markBillAsPaid,
     verifyInsurance,
 } = require("./admin.controller");
+const notificationSoundAdminRoutes = require("../../modules/notifications/sound.routes");
 
 const router = express.Router();
 
 router.use(authMiddleware, roleMiddleware(["admin"]));
+
+router.use("/notification-sounds", notificationSoundAdminRoutes);
 
 router.get("/analytics", getAnalytics);
 router.get("/users", getUsers);

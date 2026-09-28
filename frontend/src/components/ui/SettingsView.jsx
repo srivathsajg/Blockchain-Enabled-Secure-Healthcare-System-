@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { User, Phone, Mail, Camera, Loader2, Save, CheckCircle, MapPin, Users, Ruler, Scale, Droplets, Heart, Calendar, FileText, Upload, X, FileSignature } from 'lucide-react';
+import { User, Phone, Mail, Camera, Loader2, Save, CheckCircle, MapPin, Users, Ruler, Scale, Droplets, Heart, Calendar, FileText, Upload, X, FileSignature, Bell, Volume2, VolumeX, Play } from 'lucide-react';
 import { updateProfile, getBaseUrl } from '../../services/userApi';
+import { testPlayCurrentSound, setUserPreferences as setSoundUserPreferences } from '../../utils/soundPlayer';
 import CustomSelect from './CustomSelect';
 
 const SettingsView = () => {
@@ -22,6 +23,8 @@ const SettingsView = () => {
         guardianNumber: user?.guardianNumber || '',
         dob: user?.dob ? new Date(user.dob).toISOString().split('T')[0] : '',
         bio: user?.bio || '',
+        soundEnabled: user?.notificationPreferences?.soundEnabled !== false,
+        soundVolume: typeof user?.notificationPreferences?.soundVolume === 'number' ? user.notificationPreferences.soundVolume : 0.8,
     });
     const [profileImage, setProfileImage] = useState(null);
     const [previewUrl, setPreviewUrl] = useState(user?.profileImage ? `${getBaseUrl()}/${user.profileImage}` : null);
@@ -44,6 +47,8 @@ const SettingsView = () => {
                 guardianNumber: user.guardianNumber || '',
                 dob: user.dob ? new Date(user.dob).toISOString().split('T')[0] : '',
                 bio: user.bio || '',
+                soundEnabled: user.notificationPreferences?.soundEnabled !== false,
+                soundVolume: typeof user.notificationPreferences?.soundVolume === 'number' ? user.notificationPreferences.soundVolume : 0.8,
             });
             if (user.profileImage && !profileImage) {
                 setPreviewUrl(`${getBaseUrl()}/${user.profileImage}`);
@@ -97,6 +102,9 @@ const SettingsView = () => {
         data.append('guardianNumber', formData.guardianNumber);
         data.append('dob', formData.dob);
         data.append('bio', formData.bio);
+
+        data.append('notificationPreferences.soundEnabled', String(formData.soundEnabled));
+        data.append('notificationPreferences.soundVolume', String(formData.soundVolume));
         
         if (formData.hospitalAddress) data.append('hospitalAddress', formData.hospitalAddress);
         if (profileImage) {
@@ -118,6 +126,7 @@ const SettingsView = () => {
                 const updatedUser = { ...user, ...res.user };
                 setUser(updatedUser);
                 localStorage.setItem('user', JSON.stringify(updatedUser));
+                setSoundUserPreferences({ soundEnabled: formData.soundEnabled, soundVolume: formData.soundVolume });
                 setCertificates([]); // Clear newly uploaded certificates
                 setTimeout(() => setSuccess(false), 3000);
             }
@@ -436,6 +445,71 @@ const SettingsView = () => {
                                 </div>
                             </>
                         )}
+                    </div>
+
+                    <div className="pt-6 border-t border-gray-800">
+                        <h3 className="text-sm font-bold text-gray-400 flex items-center gap-2 mb-5">
+                            <Bell size={16} className="text-amber-500" /> Notification Preferences
+                        </h3>
+                        <div className="space-y-5">
+                            <div className="flex items-center justify-between p-4 bg-[#1a1a1a] border border-gray-800 rounded-xl">
+                                <div className="flex items-center gap-3">
+                                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${formData.soundEnabled ? 'bg-emerald-500/10 text-emerald-400' : 'bg-gray-800 text-gray-500'}`}>
+                                        {formData.soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-semibold text-gray-100">Enable Notification Sounds</p>
+                                        <p className="text-xs text-gray-500 mt-0.5">Play audible alerts for real-time updates</p>
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    role="switch"
+                                    aria-pressed={formData.soundEnabled}
+                                    onClick={() => setFormData({ ...formData, soundEnabled: !formData.soundEnabled })}
+                                    className={`relative w-12 h-7 rounded-full transition-colors duration-200 ${formData.soundEnabled ? 'bg-emerald-500' : 'bg-gray-700'}`}
+                                >
+                                    <span className={`absolute top-1 left-1 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200 ${formData.soundEnabled ? 'translate-x-5' : ''}`} />
+                                </button>
+                            </div>
+
+                            <div className={`p-4 bg-[#1a1a1a] border border-gray-800 rounded-xl transition-opacity ${formData.soundEnabled ? 'opacity-100' : 'opacity-50'}`}>
+                                <div className="flex items-center justify-between mb-3">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                                        Notification Volume
+                                    </label>
+                                    <span className="text-xs font-bold text-emerald-400 tabular-nums">
+                                        {Math.round(formData.soundVolume * 100)}%
+                                    </span>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <VolumeX size={16} className="text-gray-500 shrink-0" />
+                                    <input
+                                        type="range"
+                                        min="0"
+                                        max="100"
+                                        step="1"
+                                        disabled={!formData.soundEnabled}
+                                        value={Math.round(formData.soundVolume * 100)}
+                                        onChange={(e) => setFormData({ ...formData, soundVolume: Number(e.target.value) / 100 })}
+                                        className="flex-1 h-2 bg-gray-800 rounded-full appearance-none cursor-pointer accent-emerald-500 disabled:cursor-not-allowed"
+                                    />
+                                    <Volume2 size={16} className="text-gray-400 shrink-0" />
+                                </div>
+                            </div>
+
+                            <div className="flex gap-3">
+                                <button
+                                    type="button"
+                                    disabled={!formData.soundEnabled}
+                                    onClick={() => testPlayCurrentSound()}
+                                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm border border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                    <Play size={16} />
+                                    Test Sound
+                                </button>
+                            </div>
+                        </div>
                     </div>
 
                     {error && (

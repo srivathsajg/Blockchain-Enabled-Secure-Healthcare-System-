@@ -1,0 +1,62 @@
+[
+  {
+    "patient": "Patient 1 \u2014 Healthy adult male (weight loss goal)",
+    "status": "success",
+    "bmi": 29.39,
+    "bmi_status": "Overweight",
+    "target_cal": 2280.0,
+    "actual_cal": 2480.2,
+    "meal_count": 5,
+    "valid": true,
+    "rules_count": 0,
+    "warnings": []
+  },
+  {
+    "patient": "Patient 2 \u2014 Diabetic vegetarian female",
+    "status": "success",
+    "bmi": 27.43,
+    "bmi_status": "Overweight",
+    "target_cal": 1648.0,
+    "actual_cal": 1812.58,
+    "meal_count": 5,
+    "valid": true,
+    "rules_count": 1,
+    "warnings": []
+  },
+  {
+    "patient": "Patient 3 \u2014 Hypertensive elderly male",
+    "status": "success",
+    "bmi": 27.64,
+    "bmi_status": "Overweight",
+    "target_cal": 1812.0,
+    "actual_cal": 1993.36,
+    "meal_count": 5,
+    "valid": true,
+    "rules_count": 1,
+    "warnings": []
+  },
+  {
+    "patient": "Patient 4 \u2014 Anaemic young female (vegan, muscle gain)",
+    "status": "success",
+    "bmi": 20.03,
+    "bmi_status": "Normal",
+    "target_cal": 2289.0,
+    "actual_cal": 2060.07,
+    "meal_count": 5,
+    "valid": true,
+    "rules_count": 1,
+    "warnings": []
+  },
+  {
+    "patient": "Patient 5 \u2014 Obese + high cholesterol, vegetarian",
+    "status": "success",
+    "bmi": 36.33,
+    "bmi_status": "Obese",
+    "target_cal": 1561.0,
+    "actual_cal": 1445.85,
+    "meal_count": 5,
+    "valid": true,
+    "rules_count": 3,
+    "warnings": []
+  }
+]

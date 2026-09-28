@@ -178,12 +178,25 @@ const loginUser = async ({ identifier, password }) => {
       role: user.role,
       phone: user.phone,
       gender: user.gender,
+      dob: user.dob,
+      bloodGroup: user.bloodGroup,
+      weight: user.weight,
+      height: user.height,
+      guardianNumber: user.guardianNumber,
       residentialAddress: user.residentialAddress,
       hospitalName: user.hospitalName,
       hospitalAddress: user.hospitalAddress,
       hospitalPricing: user.hospitalPricing,
       profileImage: user.profileImage,
       signature: user.signature,
+      bio: user.bio,
+      achievementCertificates: user.achievementCertificates || [],
+      notificationPreferences: {
+        soundEnabled: user.notificationPreferences?.soundEnabled !== false,
+        soundVolume: typeof user.notificationPreferences?.soundVolume === 'number'
+          ? user.notificationPreferences.soundVolume
+          : 0.8,
+      },
       createdAt: user.createdAt,
     },
     token,
@@ -214,7 +227,8 @@ const updateUserProfile = async (userId, updateData) => {
     "bio",
     "signature",
     "achievementCertificates",
-    "hospitalPricing"
+    "hospitalPricing",
+    "notificationPreferences"
   ];
   Object.keys(updateData).forEach((key) => {
     if (allowedUpdates.includes(key) && updateData[key] !== undefined) {
@@ -254,11 +268,30 @@ const updateUserProfile = async (userId, updateData) => {
         return;
       }
 
+      if (key === "notificationPreferences") {
+        const currentPrefs = user.notificationPreferences || { soundEnabled: true, soundVolume: 0.8 };
+        const incoming = updateData[key] || {};
+        const merged = {
+          soundEnabled:
+            incoming.soundEnabled !== undefined
+              ? incoming.soundEnabled === true || incoming.soundEnabled === "true"
+              : currentPrefs.soundEnabled !== false,
+          soundVolume:
+            incoming.soundVolume !== undefined
+              ? Math.min(1, Math.max(0, Number(incoming.soundVolume) || 0.8))
+              : Math.min(1, Math.max(0, Number(currentPrefs.soundVolume) || 0.8)),
+        };
+        user.notificationPreferences = merged;
+        return;
+      }
+
       user[key] = updateData[key];
     }
   });
 
   await user.save();
+
+  const prefs = user.notificationPreferences || {};
 
   return {
     id: user._id,
@@ -267,18 +300,23 @@ const updateUserProfile = async (userId, updateData) => {
     role: user.role,
     phone: user.phone,
     gender: user.gender,
+    dob: user.dob,
+    bloodGroup: user.bloodGroup,
+    weight: user.weight,
+    height: user.height,
+    guardianNumber: user.guardianNumber,
     residentialAddress: user.residentialAddress,
     hospitalName: user.hospitalName,
     hospitalAddress: user.hospitalAddress,
     hospitalPricing: user.hospitalPricing,
     profileImage: user.profileImage,
-    weight: user.weight,
-    height: user.height,
-    bloodGroup: user.bloodGroup,
-    guardianNumber: user.guardianNumber,
-    dob: user.dob,
+    signature: user.signature,
     bio: user.bio,
-    achievementCertificates: user.achievementCertificates
+    achievementCertificates: user.achievementCertificates || [],
+    notificationPreferences: {
+      soundEnabled: prefs.soundEnabled !== false,
+      soundVolume: typeof prefs.soundVolume === "number" ? prefs.soundVolume : 0.8,
+    },
   };
 };
 

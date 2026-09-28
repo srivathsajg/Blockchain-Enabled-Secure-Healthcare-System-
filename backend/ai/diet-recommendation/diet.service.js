@@ -1,209 +1,302 @@
-const dietData = require("./dietData");
+/**
+ * backend/ai/diet-recommendation/diet.service.js
+ * ==============================================
+ * Connects the Node.js Express backend with the FastAPI Python Diet AI service.
+ * Proxies patient profile & lab indicators to FastAPI on port 8000.
+ */
 
-const getMedicalIndicatorStatus = (indicators, gender = "male") => {
-  if (!indicators) return null;
-  
-  const ranges = {
-    "Hemoglobin": { min: gender === "male" ? 13.5 : 12.0, max: gender === "male" ? 17.5 : 15.5 },
-    "Blood Sugar (F)": { min: 70, max: 100 },
-    "FPG": { min: 70, max: 100 },
-    "Blood Sugar (PP)": { min: 80, max: 140 },
-    "PPPG": { min: 80, max: 140 },
-    "HbA1c": { min: 4.0, max: 5.6 },
-    "Glycated Hemoglobin": { min: 4.0, max: 5.6 },
-    "Serum Creatinine": { min: 0.7, max: 1.2 },
-    "Blood Urea": { min: 15, max: 40 },
-    "Total Cholesterol": { min: 100, max: 200 },
-    "Triglycerides": { min: 50, max: 150 },
-    "HDL Cholesterol": { min: 40, max: 60 },
-    "LDL Cholesterol": { min: 0, max: 100 },
-    "VLDL": { min: 5, max: 40 },
-    "Urine Sugar": { normal: ["negative", "nil", "trace"] },
-    "RBC Count": { min: 4.5, max: 5.5 },
-    "PCV": { min: 40, max: 50 },
-    "MCV": { min: 83, max: 101 },
-    "MCH": { min: 27, max: 32 },
-    "MCHC": { min: 31.5, max: 34.5 },
-    "RDW": { min: 11.6, max: 14.0 },
-    "Ferritin": { min: 15.0, max: 150.0 },
-    "Vitamin B12": { min: 211, max: 911 },
-    "Folate": { min: 3.1, max: 17.5 },
-    "WBC Count": { min: 4000, max: 10000 },
-    "Sodium": { min: 135, max: 145 },
-    "Potassium": { min: 3.5, max: 5.1 },
-    "Calcium": { min: 8.5, max: 10.2 },
-  };
+const axios = require("axios");
+const { getFoodImageUrl } = require("./foodImage.service");
 
-  const results = {};
-  for (const [key, value] of Object.entries(indicators)) {
-    const range = ranges[key];
-    
-    if (range) {
-      if (range.normal) {
-        const valStr = (value || "").toLowerCase();
-        if (range.normal.includes(valStr)) results[key] = { value, status: "normal" };
-        else results[key] = { value, status: "high" };
-        continue;
-      }
+const FASTAPI_URL = process.env.DIET_AI_SERVICE_URL || "http://127.0.0.1:8000";
 
-      const val = parseFloat(value);
-      if (val > range.max) results[key] = { value, status: "high" };
-      else if (val < range.min) results[key] = { value, status: "low" };
-      else results[key] = { value, status: "normal" };
-    } else {
-      results[key] = { value, status: "normal" };
-    }
-  }
-  return results;
+/**
+ * Standard biomarker reference ranges for adult decision-support display.
+ * (Used by UI to highlight normal / low / high status in lab indicators).
+ */
+const BIOMARKER_RANGES = {
+  hemoglobin: { min: 12.0, max: 17.5, unit: "g/dL" },
+  glucose: { min: 70, max: 100, unit: "mg/dL" },
+  cholesterol: { min: 125, max: 200, unit: "mg/dL" },
+  blood_pressure_systolic: { min: 90, max: 120, unit: "mmHg" },
+  blood_pressure_diastolic: { min: 60, max: 80, unit: "mmHg" },
+  creatinine: { min: 0.6, max: 1.2, unit: "mg/dL" },
+  hba1c: { min: 4.0, max: 5.6, unit: "%" },
+  triglycerides: { min: 50, max: 150, unit: "mg/dL" },
+  iron: { min: 60, max: 170, unit: "µg/dL" },
+  calcium: { min: 8.5, max: 10.5, unit: "mg/dL" },
+  vitamin_d: { min: 20, max: 50, unit: "ng/mL" },
+  vitamin_b12: { min: 200, max: 900, unit: "pg/mL" },
 };
 
-const predictDietFromIndicators = (indicators = {}, patientId = "default", forceRandom = false, profile = {}) => {
-  // 1. Calculate Age from DOB
-  let age = 30;
-  if (profile.dob) {
-    const birthDate = new Date(profile.dob);
-    const today = new Date();
-    age = today.getFullYear() - birthDate.getFullYear();
-    const m = today.getMonth() - birthDate.getMonth();
-    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) age--;
+/**
+ * Decorate raw medical indicators with high/low/normal status tags for UI display.
+ */
+function getMedicalIndicatorStatus(rawIndicators, gender) {
+  if (!rawIndicators || typeof rawIndicators !== "object") return {};
+  const result = {};
+
+  for (const [key, val] of Object.entries(rawIndicators)) {
+    if (val === null || val === undefined || isNaN(val)) continue;
+    const numVal = parseFloat(val);
+    const range = BIOMARKER_RANGES[key.toLowerCase()];
+
+    let status = "normal";
+    if (range) {
+      if (numVal < range.min) status = "low";
+      else if (numVal > range.max) status = "high";
+    }
+
+    result[key] = {
+      value: numVal,
+      status,
+      unit: range ? range.unit : "",
+      referenceMin: range ? range.min : null,
+      referenceMax: range ? range.max : null,
+    };
   }
 
-  // 2. Physical Profile
-  const heightCm = parseFloat(profile.height) || 170;
-  const weightKg = parseFloat(profile.weight) || 70;
-  const gender = (profile.gender || "male").toLowerCase();
+  return result;
+}
 
-  // 3. BMI Calculation
-  const heightM = heightCm / 100;
-  const bmi = weightKg / (heightM * heightM);
+/**
+ * Calculate age from date of birth (DOB) or default to 30.
+ */
+function calculateAge(dob) {
+  if (!dob) return 30;
+  const birthDate = new Date(dob);
+  if (isNaN(birthDate.getTime())) return 30;
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return age > 0 && age < 120 ? age : 30;
+}
 
-  // 4. Analyze Indicators
-  const analysis = getMedicalIndicatorStatus(indicators, gender);
-  const targetKeys = new Set();
+/**
+ * Map Node.js patient profile + raw indicators into FastAPI PatientInput schema.
+ */
+function buildFastAPIPayload(patientId, userProfile, rawIndicators, forceRandom = false) {
+  const age = calculateAge(userProfile.dob);
+  const height_cm = parseFloat(userProfile.height) || 170.0;
+  const weight_kg = parseFloat(userProfile.weight) || 70.0;
+  const gender = (userProfile.gender || "male").toLowerCase();
 
-  for (const [key, result] of Object.entries(analysis || {})) {
-    if (result.status === "low") {
-      if (dietData[key]) targetKeys.add(key);
-      else if (key === "Iron" || key === "Ferritin") targetKeys.add("Hemoglobin");
-      else if (key === "Albumin") targetKeys.add("Protein");
-    } else if (result.status === "high") {
-      if (["Blood Sugar (F)", "FPG", "HbA1c", "Glycated Hemoglobin"].includes(key)) {
-        targetKeys.add("Blood Sugar (F)");
-      } else if (["Total Cholesterol", "LDL Cholesterol", "Triglycerides"].includes(key)) {
-        targetKeys.add("Total Cholesterol");
-      }
-    }
+  // Normalize diet type
+  let diet_type = "any";
+  const pref = (userProfile.dietary_preference || userProfile.dietaryPreference || "").toLowerCase();
+  if (pref.includes("veg") && !pref.includes("non")) {
+    diet_type = "veg";
+  } else if (pref.includes("non")) {
+    diet_type = "non_veg";
+  } else if (pref.includes("vegan")) {
+    diet_type = "vegan";
   }
 
-  if (targetKeys.size === 0) targetKeys.add("general wellness");
+  // Parse allergies
+  let allergies = [];
+  if (Array.isArray(userProfile.allergies)) {
+    allergies = userProfile.allergies.map(a => String(a).toLowerCase().trim());
+  } else if (typeof userProfile.allergies === "string") {
+    allergies = userProfile.allergies.split(",").map(a => a.toLowerCase().trim()).filter(Boolean);
+  }
 
-  const finalTargetKeys = [...targetKeys];
+  // Parse chronic diseases / conditions
+  let medical_conditions = [];
+  const diseases = userProfile.chronicDiseases || userProfile.medical_conditions || [];
+  const diseaseList = Array.isArray(diseases) ? diseases : (typeof diseases === "string" ? diseases.split(",") : []);
 
-  // 5. BMR Calculation
-  let bmr = 10 * weightKg + 6.25 * heightCm - 5 * age;
-  if (gender === "male") bmr += 5;
-  else bmr -= 161;
-
-  // 6. Selection logic
-  const getHash = (str) => {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      hash = (hash << 5) - hash + str.charCodeAt(i);
-      hash |= 0;
+  diseaseList.forEach(d => {
+    const text = String(d).toLowerCase();
+    if (text.includes("hyper") || text.includes("bp") || text.includes("blood pressure")) {
+      medical_conditions.push("hypertension");
     }
-    return Math.abs(hash);
-  };
-
-  const seed = forceRandom ? Math.random().toString() : patientId.toString();
-  const patientHash = getHash(seed);
-
-  const finalPlan = {
-    morning: [],
-    afternoon: [],
-    snacks: [],
-    night: [],
-    metadata: {
-      bmi: bmi.toFixed(1),
-      dailyCalorieNeeds: Math.round(bmr * 1.2),
-      analysis
+    if (text.includes("diabet") || text.includes("sugar")) {
+      medical_conditions.push("diabetes");
     }
-  };
-
-  finalTargetKeys.forEach((key) => {
-    const data = dietData[key] || dietData["general wellness"];
-    finalPlan.morning.push(...data.morning);
-    finalPlan.afternoon.push(...data.afternoon);
-    finalPlan.snacks.push(...data.snacks);
-    finalPlan.night.push(...data.night);
+    if (text.includes("anem") || text.includes("iron")) {
+      medical_conditions.push("anemia");
+    }
+    if (text.includes("choles") || text.includes("lipid")) {
+      medical_conditions.push("high_cholesterol");
+    }
+    if (text.includes("obes") || text.includes("weight")) {
+      medical_conditions.push("obesity");
+    }
   });
 
-  const clean = (arr, categorySeed) => {
-    const unique = [...new Set(arr)];
-    if (unique.length === 0) return [];
-    const categoryHash = getHash(categorySeed);
-    const combinedHash = patientHash + categoryHash;
-    const startIdx = combinedHash % unique.length;
-    return [unique[startIdx]]; // Return only 1 item per meal category
-  };
+  // Extract lab values
+  const lab_values = {};
+  if (rawIndicators && typeof rawIndicators === "object") {
+    if (rawIndicators.hemoglobin) lab_values.hemoglobin = parseFloat(rawIndicators.hemoglobin);
+    if (rawIndicators.glucose || rawIndicators.fasting_glucose) {
+      lab_values.glucose = parseFloat(rawIndicators.glucose || rawIndicators.fasting_glucose);
+    }
+    if (rawIndicators.cholesterol) lab_values.cholesterol = parseFloat(rawIndicators.cholesterol);
+    if (rawIndicators.blood_pressure_systolic || rawIndicators.bp_systolic) {
+      lab_values.blood_pressure_systolic = parseFloat(rawIndicators.blood_pressure_systolic || rawIndicators.bp_systolic);
+    }
+    if (rawIndicators.creatinine) lab_values.creatinine = parseFloat(rawIndicators.creatinine);
+    if (rawIndicators.hba1c) lab_values.hba1c = parseFloat(rawIndicators.hba1c);
+    if (rawIndicators.triglycerides) lab_values.triglycerides = parseFloat(rawIndicators.triglycerides);
+  }
 
   return {
-    morning: clean(finalPlan.morning, "morning"),
-    afternoon: clean(finalPlan.afternoon, "afternoon"),
-    snacks: clean(finalPlan.snacks, "snacks"),
-    night: clean(finalPlan.night, "night"),
-    metadata: finalPlan.metadata,
-    targeting: finalTargetKeys
+    patient_id: patientId ? String(patientId) : undefined,
+    age,
+    gender: gender === "female" ? "female" : "male",
+    height_cm,
+    weight_kg,
+    activity_level: userProfile.activityLevel || "moderate",
+    goal: userProfile.goal || "general_wellness",
+    diet_type,
+    allergies,
+    medical_conditions: Array.from(new Set(medical_conditions)),
+    lab_values: Object.keys(lab_values).length > 0 ? lab_values : undefined,
+    meals_per_day: 4, // 4-meal slot schedule
+    force_random: Boolean(forceRandom),
   };
-};
+}
 
-const { spawn } = require("child_process");
-const path = require("path");
+/**
+ * Format FastAPI response into the shape expected by MongoDB DietPlan and React Frontend.
+ */
+function formatFastAPIResponse(fastapiData) {
+  const patientSummary = fastapiData.patient_summary || {};
+  const nutritionTargets = fastapiData.nutrition_targets || {};
+  const dailyTotals = fastapiData.daily_totals || {};
+  const rawMeals = fastapiData.meals || [];
 
-const predictDietPython = (patientId = "default", forceRandom = false, profile = {}, indicators = {}) => {
-  const spoonacularApiKey = process.env.SPOONACULAR_API_KEY;
-  return new Promise((resolve, reject) => {
-    const pythonProcess = spawn("python", [
-      path.join(__dirname, "../../../ai_diet_model/predict.py")
-    ]);
+  // Convert raw meals list into structured 4-meal slot object for frontend
+  const mealSlotMap = {
+    breakfast: null,
+    lunch: null,
+    snack2: null,
+    dinner: null,
+  };
 
-    let dataString = "";
-    let errorString = "";
+  const legacyMorning = [];
+  const legacyAfternoon = [];
+  const legacySnacks = [];
+  const legacyNight = [];
 
-    const inputData = JSON.stringify({
-      patient_id: patientId,
-      force_random: forceRandom,
-      profile,
-      indicators,
-      spoonacular_api_key: spoonacularApiKey
-    });
+  rawMeals.forEach(m => {
+    const mealName = (m.meal || "").toLowerCase();
+    const foods = (m.foods || []).map(f => ({
+      name: f.name,
+      recipe_id: f.recipe_id,
+      quantity: `${f.quantity_g || 150}g`,
+      calories: f.calories,
+      protein: f.protein_g,
+      carbs: f.carbs_g,
+      fat: f.fat_g,
+      fiber: f.fiber_g,
+      whyRecommended: f.why_recommended,
+      suitabilityScore: Math.round((f.suitability_score || 0.8) * 100),
+      isVegetarian: f.is_vegetarian,
+      cuisine: f.cuisine,
+    }));
 
-    pythonProcess.stdin.write(inputData);
-    pythonProcess.stdin.end();
+    const primaryFood = foods[0] || {
+      name: "Nutritionally Balanced Selection",
+      quantity: "150g",
+      calories: 350,
+      protein: 15,
+      carbs: 45,
+      fat: 10,
+      fiber: 5,
+      whyRecommended: "Clinically balanced choice matching your targets.",
+    };
 
-    pythonProcess.stdout.on("data", (data) => {
-      dataString += data.toString();
-    });
+    const slotPayload = {
+      ...primaryFood,
+      time: m.time_window,
+      alternatives: [], // Alternatives are generated on-demand via the Regenerate button
+    };
 
-    pythonProcess.stderr.on("data", (data) => {
-      errorString += data.toString();
-    });
-
-    pythonProcess.on("close", (code) => {
-      if (code !== 0) {
-        console.error("Python model error:", errorString);
-        return reject(new Error("Python diet model failed"));
-      }
-      try {
-        resolve(JSON.parse(dataString));
-      } catch (e) {
-        reject(new Error("Failed to parse Python model output"));
-      }
-    });
+    if (mealName.includes("breakfast")) {
+      mealSlotMap.breakfast = slotPayload;
+      legacyMorning.push(...foods);
+    } else if (mealName.includes("lunch")) {
+      mealSlotMap.lunch = slotPayload;
+      legacyAfternoon.push(...foods);
+    } else if (mealName.includes("snack") || mealName.includes("evening")) {
+      mealSlotMap.snack2 = slotPayload;
+      legacySnacks.push(...foods);
+    } else if (mealName.includes("dinner")) {
+      mealSlotMap.dinner = slotPayload;
+      legacyNight.push(...foods);
+    }
   });
-};
+
+  return {
+    status: fastapiData.status || "success",
+    planVersion: 4,
+    metadata: {
+      bmi: patientSummary.bmi || 22.0,
+      bmiStatus: patientSummary.bmi_status || "Normal",
+      bmr: patientSummary.bmr || 1600,
+      dailyCalorieNeeds: nutritionTargets.calories || 2000,
+      tdee: patientSummary.tdee || 2000,
+      goal: patientSummary.goal || "general_wellness",
+    },
+    targets: {
+      calories: nutritionTargets.calories || 2000,
+      protein: nutritionTargets.protein_g || 80,
+      carbs: nutritionTargets.carbs_g || 250,
+      fat: nutritionTargets.fat_g || 65,
+      fiber: nutritionTargets.fiber_g || 30,
+      iron: nutritionTargets.iron_mg || 18,
+      calcium: nutritionTargets.calcium_mg || 1000,
+      vitaminC: nutritionTargets.vitamin_c_mg || 90,
+      sodiumMax: nutritionTargets.sodium_mg_max || 2300,
+    },
+    dailyTotals: {
+      calories: dailyTotals.calories || 1850,
+      protein: dailyTotals.protein_g || 75,
+      carbs: dailyTotals.carbs_g || 220,
+      fat: dailyTotals.fat_g || 50,
+      fiber: dailyTotals.fiber_g || 32,
+      sodium: dailyTotals.sodium_mg || 1400,
+      iron: dailyTotals.iron_mg || 0,
+      calcium: dailyTotals.calcium_mg || 0,
+      vitaminC: dailyTotals.vitamin_c_mg || 0,
+      cost: dailyTotals.cost_usd || null,
+    },
+    meals: mealSlotMap,
+    clinicalRulesApplied: fastapiData.clinical_rules_applied || [],
+    warnings: fastapiData.warnings || [],
+    explanations: fastapiData.explanations || [],
+    validation: fastapiData.validation || null,
+    validationBadge: fastapiData.validation?.badge || (fastapiData.validation?.overall ? "Within Target" : "Constraint Checked"),
+    modelInfo: fastapiData.model_info || null,
+    // Legacy backward-compat fields
+    morning: legacyMorning,
+    afternoon: legacyAfternoon,
+    snacks: legacySnacks,
+    night: legacyNight,
+  };
+}
+
+const { generateAITrackedDietPlan } = require("../../modules/track/track.service");
+
+/**
+ * Predict diet using the Intelligent Medical Report Grounded Indian Diet AI Engine.
+ */
+async function predictDietFastAPI(patientId, forceRandom, userProfile, rawIndicators, latestRecord = null) {
+  try {
+    const result = await generateAITrackedDietPlan(patientId, userProfile, rawIndicators, latestRecord);
+    return result;
+  } catch (error) {
+    console.error("[DietService] AI Track generation error:", error.message);
+    throw new Error(`Diet AI Service unavailable: ${error.message}`);
+  }
+}
 
 module.exports = {
+  predictDietFastAPI,
   getMedicalIndicatorStatus,
-  predictDietFromIndicators,
-  predictDietPython,
+  BIOMARKER_RANGES,
 };

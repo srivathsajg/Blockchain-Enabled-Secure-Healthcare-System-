@@ -184,6 +184,15 @@ const userSchema = new mongoose.Schema({
     expectedArrivalTime: { type: String },
     updatedAt: { type: Date }
   },
+  doctorStatus: {
+    type: String,
+    enum: ["AVAILABLE", "BUSY_WITH_EMERGENCY"],
+    default: "AVAILABLE",
+  },
+  notificationPreferences: {
+    soundEnabled: { type: Boolean, default: true },
+    soundVolume: { type: Number, default: 0.8, min: 0, max: 1 },
+  },
   createdAt: {
     type: Date,
     default: Date.now,

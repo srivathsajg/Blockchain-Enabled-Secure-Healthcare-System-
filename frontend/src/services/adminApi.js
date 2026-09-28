@@ -38,3 +38,10 @@ export const dischargePatient = (patientId, data) => API.post(`/admin/patients/$
 export const fetchBillingHistory = () => API.get('/admin/billing/history');
 export const markBillAsPaid = (billId) => API.patch(`/admin/billing/${billId}/pay`);
 export const verifyPatientInsurance = (patientId) => API.patch(`/admin/insurance/${patientId}/verify`);
+
+export const uploadNotificationSound = (formData) =>
+  API.post('/admin/notification-sounds/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+export const fetchNotificationSounds = () => API.get('/admin/notification-sounds');
+export const updateNotificationSound = (id, patch) =>
+  API.patch(`/admin/notification-sounds/${id}`, patch);
+export const deleteNotificationSound = (id) => API.delete(`/admin/notification-sounds/${id}`);

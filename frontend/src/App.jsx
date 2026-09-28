@@ -13,6 +13,7 @@ import PharmacistDashboard from './pages/PharmacistDashboard';
 import DeliveryDashboard from './pages/DeliveryDashboard';
 import AdminDashboard from './pages/AdminDashboard';
 import LabTechnicianDashboard from './pages/LabTechnicianDashboard';
+import AmbulanceDashboard from './pages/AmbulanceDashboard';
 
 // Patient sub-pages
 import PatientOverview from './pages/patient/PatientOverview';
@@ -31,7 +32,10 @@ import MyEmergencies from './pages/patient/MyEmergencies';
 import EmergencyCaseDetails from './pages/patient/EmergencyCaseDetails';
 import DoctorPatientQRView from './pages/doctor/DoctorPatientQRView';
 
+import useAudioUnlock from './hooks/useAudioUnlock';
+
 function App() {
+  useAudioUnlock();
   return (
     <BrowserRouter>
       <Routes>
@@ -55,6 +59,14 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={['doctor']}>
               <DoctorDashboard />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/doctor-dashboard/emergencies/:id"
+          element={
+            <ProtectedRoute allowedRoles={['doctor', 'patient']}>
+              <EmergencyCaseDetails />
             </ProtectedRoute>
           }
         />
@@ -120,6 +132,16 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={['admin']}>
               <AdminDashboard />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* ── Ambulance ── */}
+        <Route
+          path="/ambulance-dashboard"
+          element={
+            <ProtectedRoute allowedRoles={['ambulance']}>
+              <AmbulanceDashboard />
             </ProtectedRoute>
           }
         />

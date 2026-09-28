@@ -29,7 +29,7 @@ const fetchFromIPFS = async (ipfsHash) => {
     console.error("IPFS Fetch Error:", error.message);
     throw new Error("IPFS fetch failed");
   }
-};
+}; 
 
 module.exports = {
   uploadToIPFS,

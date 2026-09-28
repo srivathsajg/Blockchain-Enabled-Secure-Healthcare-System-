@@ -15,9 +15,10 @@ import NotificationBell from '../components/ui/NotificationBell';
 
 const LabTechnicianDashboard = () => {
     const { user, logout } = useAuth();
-    const [notificationCount, resetNotifications] = useSocketNotifications({ 
+    const [notificationCount, resetNotifications, , notifications, markNotificationRead] = useSocketNotifications({
         userId: user?._id || user?.id, 
-        hospitalName: user?.hospitalName 
+        hospitalName: user?.hospitalName,
+        notificationPrefs: user?.notificationPreferences,
     });
     
     const [activeTab, setActiveTab] = useState('patients');
@@ -188,7 +189,7 @@ const LabTechnicianDashboard = () => {
                         <UniversalSearchBar />
                     </div>
                     <div className="flex items-center gap-4">
-                        <NotificationBell count={notificationCount} onReset={resetNotifications} />
+                        <NotificationBell count={notificationCount} notifications={notifications} onClick={resetNotifications} onMarkRead={markNotificationRead} />
                         <div className="text-right">
                             <p className="text-sm font-bold text-white">{user?.name || 'Lab Tech'}</p>
                             <p className="text-[10px] text-gray-500 uppercase tracking-tighter leading-tight font-medium">{user?.hospitalName || 'Medicare Lab'}</p>

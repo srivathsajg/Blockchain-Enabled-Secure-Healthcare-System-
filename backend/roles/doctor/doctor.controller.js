@@ -3,10 +3,13 @@ const Prescription = require("../../modules/prescriptions/models/prescription.mo
 const User = require("../../modules/users/models/user.model");
 const Appointment = require("../../modules/appointments/models/appointment.model");
 const DoctorAvailability = require("../../modules/appointments/models/availability.model");
-const { reassignAppointment } = require("../../modules/appointments/service");
+const EmergencyCase = require("../../modules/emergency/models/emergencyCase.model");
 const { createOrder } = require("../../modules/pharmacy-orders/service");
 const { logAction } = require("../../modules/audit/service");
 const crypto = require("crypto");
+const mongoose = require("mongoose");
+const { assertValidStatusTransition } = require("../../modules/emergency/service");
+const { getPatientRecords } = require("../../modules/medical-records/service");
 const socket = require("../../core/socket");
 
 // NOTE: Blockchain service is loaded lazily inside createRecord to prevent
@@ -80,6 +83,65 @@ exports.getPatientHistory = async (req, res) => {
             data: { records, prescriptions }
         });
     } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// GET /api/doctor/emergency-cases/:caseId/medical-history
+exports.getEmergencyCaseMedicalHistory = async (req, res) => {
+    try {
+        const { caseId } = req.params;
+        const doctorId = req.user.id;
+
+        const emergencyCase = await EmergencyCase.findById(caseId)
+            .populate("patient", "_id name email")
+            .populate("assignedDoctor", "_id name hospitalName");
+
+        if (!emergencyCase) {
+            return res.status(404).json({ success: false, message: "Emergency case not found" });
+        }
+
+        const patientId = emergencyCase.patient?._id || emergencyCase.patient;
+        if (!patientId) {
+            return res.status(404).json({ success: false, message: "Patient not found for this emergency case" });
+        }
+
+        const doctor = await User.findById(doctorId).select("hospitalName");
+        const assignedDoctorId = emergencyCase.assignedDoctor?._id || emergencyCase.assignedDoctor;
+        const sameHospital = !!doctor?.hospitalName &&
+            !!emergencyCase.assignedHospital &&
+            doctor.hospitalName.toLowerCase() === emergencyCase.assignedHospital.toLowerCase();
+
+        const isAuthorized = String(assignedDoctorId) === String(doctorId) || sameHospital;
+        if (!isAuthorized) {
+            return res.status(403).json({
+                success: false,
+                message: "Forbidden: You are not authorized to view this patient medical history"
+            });
+        }
+
+        await logAction({
+            userId: doctorId,
+            role: req.user.role,
+            action: "VIEW_EMERGENCY_CASE_MEDICAL_HISTORY",
+            module: "Doctor",
+            targetId: caseId,
+            ipAddress: req.ip,
+            details: {
+                patientId: String(patientId),
+                patientName: emergencyCase.patient?.name || "Unknown Patient",
+                emergencyCaseId: caseId
+            }
+        });
+
+        const records = await getPatientRecords(patientId);
+
+        res.json({
+            success: true,
+            data: records
+        });
+    } catch (error) {
+        console.error("Error fetching emergency case medical history:", error);
         res.status(500).json({ success: false, message: error.message });
     }
 };
@@ -530,47 +592,78 @@ exports.createAvailability = async (req, res) => {
 exports.updateDelayStatus = async (req, res) => {
     try {
         const doctorId = req.user.id;
-        const { isDelayed, reason, expectedArrivalTime } = req.body;
+        const { isDelayed, reason, expectedArrivalTime, appointmentId, message } = req.body;
 
-        const doctor = await User.findByIdAndUpdate(
-            doctorId,
-            {
-                $set: {
-                    delayStatus: {
-                        isDelayed,
-                        reason: isDelayed ? reason : "",
-                        expectedArrivalTime: isDelayed ? expectedArrivalTime : "",
-                        updatedAt: new Date()
-                    }
-                }
-            },
-            { new: true }
-        );
-
-        // Notify all patients booked with this doctor today
-        try {
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
-            const tomorrow = new Date(today);
-            tomorrow.setDate(tomorrow.getDate() + 1);
-
-            const appointments = await Appointment.find({
-                doctorId,
-                date: { $gte: today, $lt: tomorrow },
-                status: { $in: ["pending", "approved"] }
-            });
-
-            // Trigger automatic reassignment for each appointment
-            if (isDelayed) {
-                for (const apt of appointments) {
-                    await reassignAppointment(apt._id);
-                }
+        if (isDelayed) {
+            if (!appointmentId || !reason || !expectedArrivalTime) {
+                return res.status(400).json({ success: false, message: "Appointment, delay reason, and proposed time are required" });
             }
-        } catch (innerError) {
-            console.error("Error during automatic reassignment:", innerError.message);
-        }
 
-        res.json({ success: true, message: isDelayed ? "Appointments reassigned and delay reported" : "Delay status updated", data: doctor.delayStatus });
+            const appointment = await Appointment.findOne({
+                _id: appointmentId,
+                doctorId,
+                status: { $in: ["pending", "approved"] },
+            });
+            if (!appointment) {
+                return res.status(404).json({ success: false, message: "Appointment not found or unavailable for a delay request" });
+            }
+
+            appointment.delayRequestStatus = "pending";
+            appointment.delayReason = reason;
+            appointment.delayMessage = message || "";
+            appointment.proposedTime = expectedArrivalTime;
+            appointment.delayRequestedAt = new Date();
+            await appointment.save();
+
+            const doctor = await User.findByIdAndUpdate(
+                doctorId,
+                {
+                    $set: {
+                        delayStatus: {
+                            isDelayed: true,
+                            reason,
+                            expectedArrivalTime,
+                            updatedAt: new Date()
+                        }
+                    }
+                },
+                { new: true }
+            );
+
+            const payload = {
+                appointmentId: appointment._id,
+                patientId: appointment.patientId,
+                doctorId: appointment.doctorId,
+                oldTime: appointment.time,
+                proposedTime: appointment.proposedTime,
+                reason: appointment.delayReason,
+                message: appointment.delayMessage,
+                delayRequestStatus: appointment.delayRequestStatus,
+            };
+            const io = socket.getIO();
+            io.to(String(appointment.patientId)).emit("patient-delay-request", payload);
+            io.to(String(appointment.patientId)).emit("appointment-updated", payload);
+            io.to(String(doctorId)).emit("doctor-delay-reported", payload);
+
+            return res.json({ success: true, message: "Delay request sent to the patient", data: doctor.delayStatus });
+        } else {
+            const doctor = await User.findByIdAndUpdate(
+                doctorId,
+                {
+                    $set: {
+                        delayStatus: {
+                            isDelayed: false,
+                            reason: "",
+                            expectedArrivalTime: "",
+                            updatedAt: new Date()
+                        }
+                    }
+                },
+                { new: true }
+            );
+
+            return res.json({ success: true, message: "Delay status updated", data: doctor.delayStatus });
+        }
     } catch (error) {
         console.error("Error updating delay status:", error);
         res.status(500).json({ success: false, message: error.message });
@@ -695,5 +788,303 @@ exports.issueAdmissionCertificate = async (req, res) => {
     } catch (error) {
         console.error("Error issuing certificate:", error);
         res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// POST /api/doctor/start-emergency/:caseId
+exports.startDoctorEmergency = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+        const doctorId = req.user.id;
+        const { caseId } = req.params;
+
+        const emergencyCase = await EmergencyCase.findById(caseId).session(session);
+        if (!emergencyCase) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(404).json({ success: false, message: "Emergency case not found" });
+        }
+
+        if (String(emergencyCase.assignedDoctor) !== String(doctorId)) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(403).json({ success: false, message: "Not authorized to start this emergency case" });
+        }
+
+        if (emergencyCase.responseType !== "DOCTOR_EMERGENCY") {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ success: false, message: "Start Emergency is only available for DOCTOR_EMERGENCY cases" });
+        }
+
+        if (emergencyCase.status !== "REPORTED") {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ success: false, message: `Cannot start emergency with status ${emergencyCase.status}. Expected REPORTED.` });
+        }
+
+        assertValidStatusTransition(emergencyCase.status, "UNDER_TREATMENT", emergencyCase.responseType);
+
+        const now = new Date();
+        const oldStatus = emergencyCase.status;
+        emergencyCase.status = "UNDER_TREATMENT";
+        if (!emergencyCase.statusTimestamps) {
+            emergencyCase.statusTimestamps = new Map();
+        }
+        emergencyCase.statusTimestamps.set("UNDER_TREATMENT", now);
+        await emergencyCase.save({ session });
+
+        await User.findByIdAndUpdate(
+            doctorId,
+            { $set: { doctorStatus: "BUSY_WITH_EMERGENCY" } },
+            { session, new: true }
+        );
+
+        const affectedAppointments = await Appointment.find({
+            doctorId: new mongoose.Types.ObjectId(doctorId),
+            status: { $in: ["pending", "approved"] },
+            _id: { $ne: emergencyCase.linkedAppointmentId },
+        }).session(session);
+
+        const affectedPatientIds = affectedAppointments.map(a => String(a.patientId)).filter(Boolean);
+        const uniquePatientIds = [...new Set(affectedPatientIds)];
+
+        await session.commitTransaction();
+        session.endSession();
+
+        const ipAddress = req.ip || (req.headers && req.headers["x-forwarded-for"]) || (req.connection && req.connection.remoteAddress) || "127.0.0.1";
+        await logAction({
+            userId: new mongoose.Types.ObjectId(doctorId),
+            role: req.user.role,
+            action: "DOCTOR_EMERGENCY_STARTED",
+            module: "EMERGENCY",
+            targetId: caseId,
+            ipAddress,
+            details: {
+                emergencyCaseId: caseId,
+                patientId: emergencyCase.patient ? String(emergencyCase.patient) : null,
+                affectedAppointmentsCount: affectedAppointments.length,
+            },
+        });
+
+        try {
+            const io = socket.getIO();
+            io.emit("emergency-status-updated", {
+                emergencyCaseId: emergencyCase._id,
+                status: "UNDER_TREATMENT",
+                severity: emergencyCase.severity,
+                incidentType: emergencyCase.incidentType,
+                patientId: emergencyCase.patient ? String(emergencyCase.patient) : null,
+                assignedHospital: emergencyCase.assignedHospital || null,
+                responseType: emergencyCase.responseType,
+                oldStatus,
+                updatedBy: doctorId,
+            });
+            if (emergencyCase.patient) {
+                io.to(String(emergencyCase.patient)).emit("emergency-status-updated", {
+                    emergencyCaseId: emergencyCase._id,
+                    status: "UNDER_TREATMENT",
+                });
+            }
+            io.to(String(doctorId)).emit("emergency-status-updated", {
+                emergencyCaseId: emergencyCase._id,
+                status: "UNDER_TREATMENT",
+            });
+
+            io.to(String(doctorId)).emit("doctor-status-updated", {
+                doctorId,
+                doctorStatus: "BUSY_WITH_EMERGENCY",
+            });
+
+            uniquePatientIds.forEach(pid => {
+                io.to(pid).emit("doctor-emergency-delay", {
+                    doctorId,
+                    doctorName: req.user.name || "Your doctor",
+                    message: "Your doctor is currently handling an emergency and may experience delays. Thank you for your patience.",
+                    emergencyCaseId: caseId,
+                    affectedAt: now.toISOString(),
+                });
+            });
+        } catch (sockErr) {
+            console.warn("[startDoctorEmergency] Socket notifications skipped:", sockErr.message);
+        }
+
+        const populated = await EmergencyCase.findById(emergencyCase._id)
+            .populate("patient", "name email phone bloodGroup")
+            .populate("assignedDoctor", "name specialization hospitalName")
+            .lean();
+
+        res.json({
+            success: true,
+            message: "Emergency started successfully",
+            data: {
+                emergencyCase: populated,
+                doctorStatus: "BUSY_WITH_EMERGENCY",
+                affectedPatientsNotified: uniquePatientIds.length,
+            },
+        });
+    } catch (error) {
+        await session.abortTransaction();
+        if (session.inTransaction) session.endSession();
+        console.error("[startDoctorEmergency] Error:", error);
+        const statusCode = Number(error.statusCode) || 500;
+        res.status(statusCode).json({ success: false, message: error.message });
+    }
+};
+
+// POST /api/doctor/complete-emergency/:caseId
+exports.completeDoctorEmergency = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+        const doctorId = req.user.id;
+        const { caseId } = req.params;
+
+        const emergencyCase = await EmergencyCase.findById(caseId).session(session);
+        if (!emergencyCase) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(404).json({ success: false, message: "Emergency case not found" });
+        }
+
+        if (String(emergencyCase.assignedDoctor) !== String(doctorId)) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(403).json({ success: false, message: "Not authorized to complete this emergency case" });
+        }
+
+        if (emergencyCase.responseType !== "DOCTOR_EMERGENCY") {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ success: false, message: "Complete Emergency is only available for DOCTOR_EMERGENCY cases" });
+        }
+
+        if (emergencyCase.status !== "UNDER_TREATMENT") {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ success: false, message: `Cannot complete emergency with status ${emergencyCase.status}. Expected UNDER_TREATMENT.` });
+        }
+
+        assertValidStatusTransition(emergencyCase.status, "CLOSED", emergencyCase.responseType);
+
+        const now = new Date();
+        const oldStatus = emergencyCase.status;
+        emergencyCase.status = "CLOSED";
+        if (!emergencyCase.statusTimestamps) {
+            emergencyCase.statusTimestamps = new Map();
+        }
+        emergencyCase.statusTimestamps.set("CLOSED", now);
+        await emergencyCase.save({ session });
+
+        const activeDoctorEmergencies = await EmergencyCase.countDocuments({
+            assignedDoctor: new mongoose.Types.ObjectId(doctorId),
+            responseType: "DOCTOR_EMERGENCY",
+            status: { $in: ["REPORTED", "UNDER_TREATMENT"] },
+        }).session(session);
+
+        let finalDoctorStatus = "BUSY_WITH_EMERGENCY";
+        if (activeDoctorEmergencies === 0) {
+            await User.findByIdAndUpdate(
+                doctorId,
+                { $set: { doctorStatus: "AVAILABLE" } },
+                { session, new: true }
+            );
+            finalDoctorStatus = "AVAILABLE";
+        }
+
+        const affectedAppointments = await Appointment.find({
+            doctorId: new mongoose.Types.ObjectId(doctorId),
+            status: { $in: ["pending", "approved"] },
+            _id: { $ne: emergencyCase.linkedAppointmentId },
+        }).session(session);
+
+        const affectedPatientIds = affectedAppointments.map(a => String(a.patientId)).filter(Boolean);
+        const uniquePatientIds = [...new Set(affectedPatientIds)];
+
+        await session.commitTransaction();
+        session.endSession();
+
+        const ipAddress = req.ip || (req.headers && req.headers["x-forwarded-for"]) || (req.connection && req.connection.remoteAddress) || "127.0.0.1";
+        await logAction({
+            userId: new mongoose.Types.ObjectId(doctorId),
+            role: req.user.role,
+            action: "DOCTOR_EMERGENCY_COMPLETED",
+            module: "EMERGENCY",
+            targetId: caseId,
+            ipAddress,
+            details: {
+                emergencyCaseId: caseId,
+                patientId: emergencyCase.patient ? String(emergencyCase.patient) : null,
+                finalDoctorStatus,
+                remainingActiveEmergencies: activeDoctorEmergencies,
+            },
+        });
+
+        try {
+            const io = socket.getIO();
+            io.emit("emergency-status-updated", {
+                emergencyCaseId: emergencyCase._id,
+                status: "CLOSED",
+                severity: emergencyCase.severity,
+                incidentType: emergencyCase.incidentType,
+                patientId: emergencyCase.patient ? String(emergencyCase.patient) : null,
+                assignedHospital: emergencyCase.assignedHospital || null,
+                responseType: emergencyCase.responseType,
+                oldStatus,
+                updatedBy: doctorId,
+            });
+            if (emergencyCase.patient) {
+                io.to(String(emergencyCase.patient)).emit("emergency-status-updated", {
+                    emergencyCaseId: emergencyCase._id,
+                    status: "CLOSED",
+                });
+            }
+            io.to(String(doctorId)).emit("emergency-status-updated", {
+                emergencyCaseId: emergencyCase._id,
+                status: "CLOSED",
+            });
+
+            io.to(String(doctorId)).emit("doctor-status-updated", {
+                doctorId,
+                doctorStatus: finalDoctorStatus,
+            });
+
+            if (finalDoctorStatus === "AVAILABLE") {
+                uniquePatientIds.forEach(pid => {
+                    io.to(pid).emit("doctor-emergency-resolved", {
+                        doctorId,
+                        doctorName: req.user.name || "Your doctor",
+                        message: "Your doctor has completed the emergency and is now available. Normal scheduling has resumed.",
+                        emergencyCaseId: caseId,
+                        resolvedAt: now.toISOString(),
+                    });
+                });
+            }
+        } catch (sockErr) {
+            console.warn("[completeDoctorEmergency] Socket notifications skipped:", sockErr.message);
+        }
+
+        const populated = await EmergencyCase.findById(emergencyCase._id)
+            .populate("patient", "name email phone bloodGroup")
+            .populate("assignedDoctor", "name specialization hospitalName")
+            .lean();
+
+        res.json({
+            success: true,
+            message: "Emergency completed successfully",
+            data: {
+                emergencyCase: populated,
+                doctorStatus: finalDoctorStatus,
+                patientsNotified: finalDoctorStatus === "AVAILABLE" ? uniquePatientIds.length : 0,
+                remainingActiveEmergencies: activeDoctorEmergencies,
+            },
+        });
+    } catch (error) {
+        await session.abortTransaction();
+        if (session.inTransaction) session.endSession();
+        console.error("[completeDoctorEmergency] Error:", error);
+        const statusCode = Number(error.statusCode) || 500;
+        res.status(statusCode).json({ success: false, message: error.message });
     }
 };

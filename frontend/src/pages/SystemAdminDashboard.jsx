@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import {
-    ShieldCheck, Users, FileText, Activity, Database, LayoutGrid, Settings, LogOut, Loader2, Search, Edit2, Check, X, AlertTriangle, Zap, User, Plus, Building2, UserCog, UserCheck
+    ShieldCheck, Users, FileText, Activity, Database, LayoutGrid, Settings, LogOut, Loader2, Search, Edit2, Check, X, AlertTriangle, Zap, User, Plus, Building2, UserCog, UserCheck, Volume2
 } from 'lucide-react';
 import { fetchAnalytics, fetchUsers, updateUserRole, fetchAuditLogs, fetchBlockchainStatus, syncAllBlockchainRecords, createHospitalAdmin } from '../services/adminApi';
 import socket from '../services/socket';
 import SettingsView from '../components/ui/SettingsView';
 import NotificationBell from '../components/ui/NotificationBell';
+import NotificationSoundsManager from '../components/admin/NotificationSoundsManager';
 import { useSocketNotifications } from '../hooks/useSocketNotifications';
 import { getBaseUrl } from '../services/userApi';
 import {
@@ -19,7 +20,7 @@ import { useLocation } from 'react-router-dom';
 
 const SystemAdminDashboard = () => {
     const { user, logout } = useAuth();
-    const [notificationCount, resetNotifications] = useSocketNotifications({ userId: user?.id, hospitalName: user?.hospitalName });
+    const [notificationCount, resetNotifications, , notifications, markNotificationRead] = useSocketNotifications({ userId: user?.id, hospitalName: user?.hospitalName, notificationPrefs: user?.notificationPreferences });
     const [activeView, setActiveView] = useState('dashboard');
     const location = useLocation();
     
@@ -45,6 +46,8 @@ const SystemAdminDashboard = () => {
                 return <AuditLogsView isSuperAdmin={isSuperAdmin} />;
             case 'blockchain':
                 return <BlockchainView isSuperAdmin={isSuperAdmin} />;
+            case 'notificationSounds':
+                return <NotificationSoundsManager />;
             case 'settings':
                 return <SettingsView />;
             default:
@@ -74,6 +77,7 @@ const SystemAdminDashboard = () => {
                             <NavItem icon={Users} label="Hospitals & Admins" active={activeView === 'users'} onClick={() => setActiveView('users')} />
                             <NavItem icon={Activity} label="System Audit Logs" active={activeView === 'audit'} onClick={() => setActiveView('audit')} />
                             <NavItem icon={Database} label="Blockchain Monitor" active={activeView === 'blockchain'} onClick={() => setActiveView('blockchain')} />
+                            <NavItem icon={Volume2} label="Notification Sounds" active={activeView === 'notificationSounds'} onClick={() => setActiveView('notificationSounds')} />
                         
                 </nav>
 
@@ -93,7 +97,7 @@ const SystemAdminDashboard = () => {
                         <UniversalSearchBar />
                     </div>
                     <div className="flex items-center gap-4">
-                        <NotificationBell count={notificationCount} onClick={resetNotifications} />
+                        <NotificationBell count={notificationCount} notifications={notifications} onClick={resetNotifications} onMarkRead={markNotificationRead} />
                         <div className="flex items-center gap-3">
                             <div className="text-right hidden sm:block">
                                 <p className="text-sm font-bold text-white">{user?.name}</p>

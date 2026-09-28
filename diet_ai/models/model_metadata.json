@@ -1,0 +1,74 @@
+{
+  "model": "XGBoost Regressor",
+  "task": "food_suitability_ranking",
+  "model_version": "xgb-v4-100rounds-20260928",
+  "trained_at": "2026-09-28T14:51:06.669136+00:00",
+  "training_duration_sec": 0.66,
+  "dataset_version": "9c1c96893b51",
+  "n_estimators": 100,
+  "boosting_rounds": 100,
+  "best_iteration": 100,
+  "feature_count": 27,
+  "feature_columns": [
+    "calorie_gap_score",
+    "protein_gap_score",
+    "carbs_gap_score",
+    "fat_gap_score",
+    "fiber_gap_score",
+    "iron_gap_score",
+    "calcium_gap_score",
+    "vitc_gap_score",
+    "sodium_penalty",
+    "sugar_penalty",
+    "fat_penalty",
+    "diet_compat",
+    "slot_compat",
+    "cuisine_compat",
+    "calorie_density",
+    "protein_density",
+    "fiber_density",
+    "iron_boost",
+    "vitc_boost",
+    "cost_score",
+    "food_calories",
+    "food_protein_g",
+    "food_fiber_g",
+    "food_sodium_mg",
+    "food_iron_mg",
+    "food_fat_g",
+    "food_carbs_g"
+  ],
+  "training_rows": 28086,
+  "validation_rows": 5932,
+  "test_rows": 5982,
+  "random_state": 42,
+  "hyperparameters": {
+    "n_estimators": 100,
+    "learning_rate": 0.05,
+    "max_depth": 6,
+    "min_child_weight": 2,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "random_state": 42,
+    "n_jobs": -1
+  },
+  "metrics": {
+    "train": {
+      "mae": 0.0077,
+      "rmse": 0.0098,
+      "r2": 0.9883
+    },
+    "val": {
+      "mae": 0.0095,
+      "rmse": 0.0127,
+      "r2": 0.9798
+    },
+    "test": {
+      "mae": 0.0097,
+      "rmse": 0.0129,
+      "r2": 0.9792
+    }
+  }
+}

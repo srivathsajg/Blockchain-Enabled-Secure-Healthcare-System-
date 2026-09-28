@@ -1,0 +1,211 @@
+diff --git a/backend/modules/appointments/models/appointment.model.js b/backend/modules/appointments/models/appointment.model.js
+index 8aedf2c..67cc387 100644
+--- a/backend/modules/appointments/models/appointment.model.js
++++ b/backend/modules/appointments/models/appointment.model.js
+@@ -53,6 +53,23 @@ const appointmentSchema = new Schema({
+     enum: ["pending", "accepted", "rejected"],
+     default: "pending",
+   },
++  delayRequestStatus: {
++    type: String,
++    enum: ["none", "pending", "accepted", "rejected"],
++    default: "none",
++  },
++  delayReason: {
++    type: String,
++  },
++  delayMessage: {
++    type: String,
++  },
++  proposedTime: {
++    type: String,
++  },
++  delayRequestedAt: {
++    type: Date,
++  },
+   lastDoctorActionAt: {
+     type: Date,
+   },
+diff --git a/backend/roles/doctor/doctor.controller.js b/backend/roles/doctor/doctor.controller.js
+index 91b549a..b9ee49b 100644
+--- a/backend/roles/doctor/doctor.controller.js
++++ b/backend/roles/doctor/doctor.controller.js
+@@ -3,7 +3,6 @@ const Prescription = require("../../modules/prescriptions/models/prescription.mo
+ const User = require("../../modules/users/models/user.model");
+ const Appointment = require("../../modules/appointments/models/appointment.model");
+ const DoctorAvailability = require("../../modules/appointments/models/availability.model");
+-const { reassignAppointment } = require("../../modules/appointments/service");
+ const { createOrder } = require("../../modules/pharmacy-orders/service");
+ const { logAction } = require("../../modules/audit/service");
+ const crypto = require("crypto");
+@@ -530,7 +529,7 @@ exports.createAvailability = async (req, res) => {
+ exports.updateDelayStatus = async (req, res) => {
+     try {
+         const doctorId = req.user.id;
+-        const { isDelayed, reason, expectedArrivalTime } = req.body;
++        const { isDelayed, reason, expectedArrivalTime, appointmentId, message } = req.body;
+ 
+         const doctor = await User.findByIdAndUpdate(
+             doctorId,
+@@ -547,30 +546,44 @@ exports.updateDelayStatus = async (req, res) => {
+             { new: true }
+         );
+ 
+-        // Notify all patients booked with this doctor today
+-        try {
+-            const today = new Date();
+-            today.setHours(0, 0, 0, 0);
+-            const tomorrow = new Date(today);
+-            tomorrow.setDate(tomorrow.getDate() + 1);
++        if (isDelayed) {
++            if (!appointmentId || !reason || !expectedArrivalTime) {
++                return res.status(400).json({ success: false, message: "Appointment, delay reason, and proposed time are required" });
++            }
+ 
+-            const appointments = await Appointment.find({
++            const appointment = await Appointment.findOne({
++                _id: appointmentId,
+                 doctorId,
+-                date: { $gte: today, $lt: tomorrow },
+-                status: { $in: ["pending", "approved"] }
++                status: { $in: ["pending", "approved"] },
+             });
+-
+-            // Trigger automatic reassignment for each appointment
+-            if (isDelayed) {
+-                for (const apt of appointments) {
+-                    await reassignAppointment(apt._id);
+-                }
++            if (!appointment) {
++                return res.status(404).json({ success: false, message: "Appointment not found or unavailable for a delay request" });
+             }
+-        } catch (innerError) {
+-            console.error("Error during automatic reassignment:", innerError.message);
++
++            appointment.delayRequestStatus = "pending";
++            appointment.delayReason = reason;
++            appointment.delayMessage = message || "";
++            appointment.proposedTime = expectedArrivalTime;
++            appointment.delayRequestedAt = new Date();
++            await appointment.save();
++
++            const payload = {
++                appointmentId: appointment._id,
++                patientId: appointment.patientId,
++                doctorId: appointment.doctorId,
++                oldTime: appointment.time,
++                proposedTime: appointment.proposedTime,
++                reason: appointment.delayReason,
++                message: appointment.delayMessage,
++                delayRequestStatus: appointment.delayRequestStatus,
++            };
++            const io = socket.getIO();
++            io.to(String(appointment.patientId)).emit("patient-delay-request", payload);
++            io.to(String(appointment.patientId)).emit("appointment-updated", payload);
++            io.to(String(doctorId)).emit("doctor-delay-reported", payload);
+         }
+ 
+-        res.json({ success: true, message: isDelayed ? "Appointments reassigned and delay reported" : "Delay status updated", data: doctor.delayStatus });
++        res.json({ success: true, message: isDelayed ? "Delay request sent to the patient" : "Delay status updated", data: doctor.delayStatus });
+     } catch (error) {
+         console.error("Error updating delay status:", error);
+         res.status(500).json({ success: false, message: error.message });
+diff --git a/backend/roles/patient/patient.controller.js b/backend/roles/patient/patient.controller.js
+index c44cd2d..0bde98c 100644
+--- a/backend/roles/patient/patient.controller.js
++++ b/backend/roles/patient/patient.controller.js
+@@ -1037,6 +1037,52 @@ const respondToReallocation = async (req, res) => {
+   }
+ };
+ 
++const respondToDelayRequest = async (req, res) => {
++  try {
++    const { id } = req.params;
++    const { accept } = req.body;
++    const patientId = req.user.id;
++    if (typeof accept !== "boolean") {
++      return res.status(400).json({ success: false, message: "accept must be a boolean" });
++    }
++
++    const appointment = await Appointment.findOne({ _id: id, patientId });
++    if (!appointment) return res.status(404).json({ success: false, message: "Appointment not found" });
++    if (appointment.delayRequestStatus !== "pending") {
++      return res.status(400).json({ success: false, message: "No pending delay request for this appointment" });
++    }
++
++    const oldTime = appointment.time;
++    appointment.delayRequestStatus = accept ? "accepted" : "rejected";
++    if (accept) {
++      appointment.time = appointment.proposedTime;
++      appointment.status = "approved";
++    }
++    await appointment.save();
++
++    const payload = {
++      appointmentId: appointment._id,
++      patientId: appointment.patientId,
++      doctorId: appointment.doctorId,
++      oldTime,
++      proposedTime: appointment.proposedTime,
++      reason: appointment.delayReason,
++      message: appointment.delayMessage,
++      delayRequestStatus: appointment.delayRequestStatus,
++      status: appointment.status,
++    };
++    const io = socket.getIO();
++    io.to(String(appointment.doctorId)).emit(accept ? "patient-delay-accepted" : "patient-delay-rejected", payload);
++    io.to(String(appointment.doctorId)).emit("appointment-updated", payload);
++    io.to(String(patientId)).emit("appointment-updated", payload);
++
++    res.json({ success: true, message: accept ? "New appointment time accepted" : "Delay request declined; the original time remains", data: appointment });
++  } catch (error) {
++    console.error("Error responding to delay request:", error);
++    res.status(500).json({ success: false, message: "Server error responding to delay request" });
++  }
++};
++
+ const getLabOrders = async (req, res) => {
+     try {
+         const patientId = req.user.id;
+@@ -1192,7 +1238,8 @@ module.exports = {
+   cancelAppointment,
+   updateInsurance,
+   getInsuranceClaims,
+-  respondToReallocation,
++    respondToReallocation,
++    respondToDelayRequest,
+   getLabOrders,
+   rateAppointment,
+   getDoctorReviews,
+diff --git a/backend/roles/patient/patient.routes.js b/backend/roles/patient/patient.routes.js
+index db38aa0..31a39ab 100644
+--- a/backend/roles/patient/patient.routes.js
++++ b/backend/roles/patient/patient.routes.js
+@@ -29,6 +29,7 @@ const {
+     updateInsurance,
+     getInsuranceClaims,
+     respondToReallocation,
++    respondToDelayRequest,
+     getLabOrders,
+     rateAppointment,
+     getDoctorReviews,
+@@ -59,6 +60,7 @@ router.post("/appointments/:id/rate", rateAppointment);
+ router.get("/doctors/:doctorId/reviews", getDoctorReviews);
+ router.patch("/cancel-appointment/:id", cancelAppointment);
+ router.patch("/reallocation-response/:id", respondToReallocation);
++router.patch("/delay-response/:id", respondToDelayRequest);
+ router.put("/update-insurance", upload.single("insuranceProofImage"), updateInsurance);
+ router.get("/insurance-claims", getInsuranceClaims);
+ router.get("/lab-orders", getLabOrders);
+diff --git a/frontend/src/services/patientApi.js b/frontend/src/services/patientApi.js
+index 8ddea60..9f54be1 100644
+--- a/frontend/src/services/patientApi.js
++++ b/frontend/src/services/patientApi.js
+@@ -39,6 +39,7 @@ export const cancelAppointment = (id) => API.patch(`/patient/cancel-appointment/
+ export const rateAppointment = (id, data) => API.post(`/patient/appointments/${id}/rate`, data);
+ export const fetchDoctorReviews = (doctorId) => API.get(`/patient/doctors/${doctorId}/reviews`);
+ export const respondToReallocation = (appointmentId, data) => API.patch(`/patient/reallocation-response/${appointmentId}`, data);
++export const respondToDelayRequest = (appointmentId, data) => API.patch(`/patient/delay-response/${appointmentId}`, data);
+ 
+ export const fetchAccessLogs = () => API.get('/audit/my-access');
+ 

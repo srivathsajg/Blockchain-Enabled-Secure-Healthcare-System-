@@ -14,7 +14,7 @@ import { useSocketNotifications } from '../hooks/useSocketNotifications';
 
 const DeliveryDashboard = () => {
     const { user, logout } = useAuth();
-    const [notificationCount, resetNotifications] = useSocketNotifications({ userId: user?.id, hospitalName: user?.hospitalName });
+    const [notificationCount, resetNotifications, , notifications, markNotificationRead] = useSocketNotifications({ userId: user?.id, hospitalName: user?.hospitalName, notificationPrefs: user?.notificationPreferences });
     const [activeTab, setActiveTab] = useState('overview');
     const location = useLocation();
 
@@ -199,7 +199,7 @@ const DeliveryDashboard = () => {
                         <UniversalSearchBar />
                     </div>
                     <div className="flex items-center gap-4">
-                        <NotificationBell count={notificationCount} onClick={resetNotifications} />
+                        <NotificationBell count={notificationCount} notifications={notifications} onClick={resetNotifications} onMarkRead={markNotificationRead} />
                         <div className="flex items-center gap-3 text-right">
                             <div>
                                 <p className="text-sm font-bold text-white">{user?.name || 'Driver'}</p>

@@ -1,14 +1,16 @@
-import React, { useState, useEffect } from 'react';
+﻿﻿import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import {
-    Users, FileText, ClipboardList, Calendar, Database, Shield, LayoutGrid, Settings, User, LogOut, X, Loader2, Plus, Trash2, CheckCircle, Clock, XCircle, Activity, Building2, Edit2, QrCode
+    Users, FileText, ClipboardList, Calendar, Database, Shield, LayoutGrid, Settings, User, LogOut, X, Loader2, Plus, Trash2, CheckCircle, Clock, XCircle, Activity, Building2, Edit2, QrCode,
+    Home, AlertTriangle, Search, Bell, SlidersHorizontal
 } from 'lucide-react';
 import UniversalSearchBar from '../components/ui/UniversalSearchBar';
 import NotificationBell from '../components/ui/NotificationBell';
 import { useSocketNotifications } from '../hooks/useSocketNotifications';
 import { fetchDoctorOverview, fetchPatients, createMedicalRecord, createPrescription, fetchDoctorAppointments, updateAppointmentStatus, fetchPatientHistory, fetchPendingRecords, verifyRecord, updateDoctorDelay, fetchAdmittedPatients, issueAdmissionCertificate } from '../services/doctorApi';
 import { fetchLabTests, createLabOrder } from '../services/labApi';
-import { useLocation } from 'react-router-dom';
+import { getMyEmergencyCases, startDoctorEmergency, completeDoctorEmergency } from '../services/emergencyApi';
+import { useLocation, Link } from 'react-router-dom';
 import DoctorAvailability from './DoctorAvailability';
 import DrugSearchInput from '../components/ui/DrugSearchInput';
 import LabTestSearchInput from '../components/ui/LabTestSearchInput';
@@ -20,7 +22,7 @@ import socket from '../services/socket';
 
 const DoctorDashboard = () => {
     const { user, logout } = useAuth();
-    const [notificationCount, resetNotifications] = useSocketNotifications({ userId: user?.id, hospitalName: user?.hospitalName });
+    const [notificationCount, resetNotifications, , notifications, markNotificationRead] = useSocketNotifications({ userId: user?.id, hospitalName: user?.hospitalName, notificationPrefs: user?.notificationPreferences });
     const [activeTab, setActiveTab] = useState('overview');
     const location = useLocation();
 
@@ -34,6 +36,9 @@ const DoctorDashboard = () => {
     const [admittedPatients, setAdmittedPatients] = useState([]);
     const [appointments, setAppointments] = useState([]);
     const [pendingRecordsList, setPendingRecordsList] = useState([]);
+    const [emergencyCases, setEmergencyCases] = useState([]);
+    const [doctorStatus, setDoctorStatus] = useState(user?.doctorStatus || 'AVAILABLE');
+    const [emergencyActionLoading, setEmergencyActionLoading] = useState(null);
 
 
     // UI State
@@ -55,17 +60,17 @@ const DoctorDashboard = () => {
     // Lab Test State
     const [isLabTestModalOpen, setIsLabTestModalOpen] = useState(false);
     const [isCertificateModalOpen, setIsCertificateModalOpen] = useState(false);
-    const [certificateForm, setCertificateForm] = useState({ 
-        patientId: '', 
-        status: '', 
+    const [certificateForm, setCertificateForm] = useState({
+        patientId: '',
+        status: '',
         notes: 'Avoid heavy lifting\nNo prolonged standing for more than 2 hours\nLight desk duties preferred',
         recommendDischarge: false,
         followUpDate: ''
     });
     const [labTests, setLabTests] = useState([]);
-    const [labOrderForm, setLabOrderForm] = useState({ 
-        patientId: '', 
-        tests: [{ testName: '', price: 0 }] 
+    const [labOrderForm, setLabOrderForm] = useState({
+        patientId: '',
+        tests: [{ testName: '', price: 0 }]
     });
 
     // Form States
@@ -78,11 +83,35 @@ const DoctorDashboard = () => {
 
     // Delay State
     const [isDelayModalOpen, setIsDelayModalOpen] = useState(false);
+    const [selectedDelayAppointmentId, setSelectedDelayAppointmentId] = useState(null);
     const [delayForm, setDelayForm] = useState({
         isDelayed: false,
         reason: '',
         expectedArrivalTime: ''
     });
+
+    const closeDelayModal = () => {
+        setIsDelayModalOpen(false);
+        setSelectedDelayAppointmentId(null);
+    };
+
+    // Profile Menu
+    const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+    useEffect(() => {
+        if (!isProfileMenuOpen) return;
+        const handleClickOutside = (e) => {
+            if (!e.target.closest('[data-profile-toggle]') && !e.target.closest('[data-profile-menu]')) {
+                setIsProfileMenuOpen(false);
+            }
+        };
+        const handleEsc = (e) => { if (e.key === 'Escape') setIsProfileMenuOpen(false); };
+        document.addEventListener('mousedown', handleClickOutside);
+        document.addEventListener('keydown', handleEsc);
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+            document.removeEventListener('keydown', handleEsc);
+        };
+    }, [isProfileMenuOpen]);
 
     // Sync delay form with user data
     useEffect(() => {
@@ -105,16 +134,25 @@ const DoctorDashboard = () => {
 
     const handleDelaySubmit = async (e) => {
         e.preventDefault();
+        if (delayForm.isDelayed && !selectedDelayAppointmentId) {
+            showToast("Please select an appointment for the delay report");
+            return;
+        }
         setSubmitLoading(true);
         try {
-            const res = await updateDoctorDelay(delayForm);
+            const res = await updateDoctorDelay({
+                ...delayForm,
+                appointmentId: selectedDelayAppointmentId
+            });
             if (res.success) {
-                showToast(delayForm.isDelayed ? "Delay status reported to patients" : "Delay status cleared");
-                setIsDelayModalOpen(false);
+                showToast(delayForm.isDelayed ? "Delay status reported to patient" : "Delay status cleared");
+                closeDelayModal();
                 loadData();
+            } else {
+                showToast(res.message || "Failed to update delay status");
             }
         } catch (error) {
-            showToast("Failed to update delay status");
+            showToast(error.response?.data?.message || "Failed to update delay status");
         } finally {
             setSubmitLoading(false);
         }
@@ -123,22 +161,78 @@ const DoctorDashboard = () => {
     const loadData = async () => {
         try {
             setLoadingData(true);
-            const [overviewRes, patientsRes, appointmentsRes, labTestsRes, admittedRes] = await Promise.all([
+            const [overviewRes, patientsRes, appointmentsRes, labTestsRes, admittedRes, emergencyRes] = await Promise.all([
                 fetchDoctorOverview(),
                 fetchPatients(),
                 fetchDoctorAppointments(),
                 fetchLabTests(),
-                fetchAdmittedPatients()
+                fetchAdmittedPatients(),
+                getMyEmergencyCases().catch(() => ({ success: false, data: [] }))
             ]);
             if (overviewRes.success) setOverview(overviewRes.data);
             if (patientsRes.success) setPatients(patientsRes.data);
             if (appointmentsRes?.success) setAppointments(appointmentsRes.data);
             if (labTestsRes?.success) setLabTests(labTestsRes.data);
             if (admittedRes?.success) setAdmittedPatients(admittedRes.data);
+            if (emergencyRes?.success) setEmergencyCases(emergencyRes.data || []);
+            if (user?.doctorStatus) setDoctorStatus(user.doctorStatus);
         } catch (error) {
             console.error("Error loading doctor data:", error);
         } finally {
             setLoadingData(false);
+        }
+    };
+
+    const refreshEmergencies = async () => {
+        try {
+            const emergencyRes = await getMyEmergencyCases();
+            if (emergencyRes?.success) setEmergencyCases(emergencyRes.data || []);
+        } catch (error) {
+            console.error("Error refreshing emergency cases:", error);
+        }
+    };
+
+    const handleStartEmergency = async (caseId) => {
+        try {
+            setEmergencyActionLoading(caseId);
+            const res = await startDoctorEmergency(caseId);
+            if (res.success) {
+                showToast("Emergency started successfully. Attending to patient now.");
+                if (res.data?.doctorStatus) setDoctorStatus(res.data.doctorStatus);
+                await refreshEmergencies();
+                await loadData();
+            } else {
+                showToast(res.message || "Failed to start emergency");
+            }
+        } catch (error) {
+            console.error("Start emergency error:", error);
+            showToast("Error starting emergency. Please try again.");
+        } finally {
+            setEmergencyActionLoading(null);
+        }
+    };
+
+    const handleCompleteEmergency = async (caseId) => {
+        try {
+            setEmergencyActionLoading(caseId);
+            const res = await completeDoctorEmergency(caseId);
+            if (res.success) {
+                if (res.data?.doctorStatus === 'AVAILABLE') {
+                    showToast("Emergency completed. You are now available.");
+                } else {
+                    showToast("Emergency completed. Other active emergencies remain.");
+                }
+                if (res.data?.doctorStatus) setDoctorStatus(res.data.doctorStatus);
+                await refreshEmergencies();
+                await loadData();
+            } else {
+                showToast(res.message || "Failed to complete emergency");
+            }
+        } catch (error) {
+            console.error("Complete emergency error:", error);
+            showToast("Error completing emergency. Please try again.");
+        } finally {
+            setEmergencyActionLoading(null);
         }
     };
 
@@ -158,14 +252,46 @@ const DoctorDashboard = () => {
             loadData();
         };
 
+        const handleEmergencyStatusUpdated = (data) => {
+            if (data) {
+                showToast(`Emergency case ${data.status?.replace(/_/g, ' ') || 'updated'}${data.emergencyCaseId ? ` (${String(data.emergencyCaseId).slice(-4)})` : ''}`);
+            } else {
+                showToast("Emergency case updated");
+            }
+            refreshEmergencies();
+            loadData();
+        };
+
+        const handleEmergencyCreated = (data) => {
+            if (data?.responseType === 'DOCTOR_EMERGENCY') {
+                showToast(data.message || "New medical emergency assigned. Please check Emergency Queue.");
+            } else {
+                showToast(data.message || "New emergency case created.");
+            }
+            refreshEmergencies();
+            loadData();
+        };
+
+        const handleDoctorStatusUpdated = (data) => {
+            if (data?.doctorStatus) {
+                setDoctorStatus(data.doctorStatus);
+            }
+        };
+
         socket.on('new-appointment-received', handleNewAppointment);
         socket.on('appointment-reassigned', handleAppointmentReassigned);
         socket.on('new-appointment-assigned', handleNewAppointment);
+        socket.on('emergency-status-updated', handleEmergencyStatusUpdated);
+        socket.on('emergency-created', handleEmergencyCreated);
+        socket.on('doctor-status-updated', handleDoctorStatusUpdated);
 
         return () => {
             socket.off('new-appointment-received', handleNewAppointment);
             socket.off('appointment-reassigned', handleAppointmentReassigned);
             socket.off('new-appointment-assigned', handleNewAppointment);
+            socket.off('emergency-status-updated', handleEmergencyStatusUpdated);
+            socket.off('emergency-created', handleEmergencyCreated);
+            socket.off('doctor-status-updated', handleDoctorStatusUpdated);
         };
     }, []);
 
@@ -316,8 +442,8 @@ const DoctorDashboard = () => {
             if (res.success) {
                 showToast("Admission certificate issued successfully!");
                 setIsCertificateModalOpen(false);
-                setCertificateForm({ 
-                    patientId: '', 
+                setCertificateForm({
+                    patientId: '',
                     status: '',
                     notes: 'Avoid heavy lifting\nNo prolonged standing for more than 2 hours\nLight desk duties preferred',
                     recommendDischarge: false,
@@ -395,11 +521,11 @@ const DoctorDashboard = () => {
         const params = new URLSearchParams(location.search);
         const tab = params.get('tab');
         const id = params.get('id');
-        
+
         if (tab) {
             setActiveTab(tab);
         }
-        
+
         // If an ID is provided and we're on the patients tab, open their history
         if (id && tab === 'patients' && patients.length > 0) {
             const patient = patients.find(p => p._id === id);
@@ -413,6 +539,62 @@ const DoctorDashboard = () => {
         }
     }, [location, patients]);
 
+    // ─── Scroll-driven animated header (mobile) ───
+    const mainScrollRef = useRef(null);
+    const [headerVisible, setHeaderVisible] = useState(true);
+    const [headerShadow, setHeaderShadow] = useState(false);
+    const lastScrollY = useRef(0);
+    const ticking = useRef(false);
+
+    const handleScroll = useCallback(() => {
+        const el = mainScrollRef.current;
+        if (!el) return;
+        const scrollY = el.scrollTop;
+        const delta = scrollY - lastScrollY.current;
+
+        // Elevated shadow once scrolled past threshold
+        setHeaderShadow(scrollY > 12);
+
+        // At the very top: always show
+        if (scrollY < 60) {
+            setHeaderVisible(true);
+            lastScrollY.current = scrollY;
+            return;
+        }
+
+        // Significant scroll-down → hide; significant scroll-up → show
+        if (delta > 6) {
+            setHeaderVisible(false);
+        } else if (delta < -6) {
+            setHeaderVisible(true);
+        }
+
+        lastScrollY.current = scrollY;
+    }, []);
+
+    useEffect(() => {
+        const el = mainScrollRef.current;
+        if (!el) return;
+        const listener = () => {
+            if (!ticking.current) {
+                window.requestAnimationFrame(() => {
+                    handleScroll();
+                    ticking.current = false;
+                });
+                ticking.current = true;
+            }
+        };
+        el.addEventListener('scroll', listener, { passive: true });
+        return () => el.removeEventListener('scroll', listener);
+    }, [handleScroll]);
+
+    // Reset header visibility when switching tabs (so header starts visible for new tab)
+    useEffect(() => {
+        setHeaderVisible(true);
+        const el = mainScrollRef.current;
+        if (el) el.scrollTop = 0;
+    }, [activeTab]);
+
     return (
         <div className="flex h-screen bg-[#0a0a0a] text-white font-sans overflow-hidden relative">
 
@@ -422,8 +604,9 @@ const DoctorDashboard = () => {
                 </div>
             )}
 
-            {/* Sidebar */}
-            <aside className="w-64 border-r border-gray-800 flex flex-col bg-[#0f1110]">
+            {/* ── SIDEBAR: desktop/lg only (hidden on mobile — mobile uses bottom nav) ── */}
+            <aside className="hidden lg:flex h-full w-64 flex-shrink-0 relative z-50
+                bg-[#0f1110] border-r border-gray-800 flex flex-col">
                 <div className="p-7 flex items-center gap-4 border-b border-white/[0.05] relative group cursor-default">
                     <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/[0.02] to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
                     <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-400 p-[1px]">
@@ -438,75 +621,273 @@ const DoctorDashboard = () => {
                 </div>
 
                 <nav className="flex-1 px-4 space-y-2 mt-4">
-                    <NavItem icon={LayoutGrid} label="Dashboard" active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} />
-                    <NavItem icon={Calendar} label="Appointments" active={activeTab === 'appointments'} onClick={() => setActiveTab('appointments')} />
-                    <NavItem icon={Building2} label="Admitted Patients" active={activeTab === 'admitted'} onClick={() => setActiveTab('admitted')} />
-                    <NavItem icon={Clock} label="Availability" active={activeTab === 'availability'} onClick={() => setActiveTab('availability')} />
-                    <NavItem icon={FileText} label="Pending verification" active={activeTab === 'verification'} onClick={() => setActiveTab('verification')} />
+                    <NavItem icon={LayoutGrid} label="Dashboard" active={activeTab === 'overview'} onClick={() => { setActiveTab('overview'); }} />
+                    <NavItem icon={Calendar} label="Appointments" active={activeTab === 'appointments'} onClick={() => { setActiveTab('appointments'); }} />
+                    <NavItem icon={Building2} label="Admitted Patients" active={activeTab === 'admitted'} onClick={() => { setActiveTab('admitted'); }} />
+                    <NavItem icon={Clock} label="Availability" active={activeTab === 'availability'} onClick={() => { setActiveTab('availability'); }} />
+                    <NavItem icon={FileText} label="Pending verification" active={activeTab === 'verification'} onClick={() => { setActiveTab('verification'); }} />
                 </nav>
 
                 <div className="p-4 mt-auto space-y-2">
-                    <NavItem icon={Settings} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
+                    <NavItem icon={Settings} label="Settings" active={activeTab === 'settings'} onClick={() => { setActiveTab('settings'); }} />
                     <NavItem icon={LogOut} label="Logout" onClick={logout} />
                 </div>
             </aside>
 
             {/* Main Content */}
             <main className="flex-1 flex flex-col overflow-hidden">
-                <header className="h-16 border-b border-gray-800 flex items-center justify-between px-8 bg-[#0a0a0a]">
-                    <div className="flex items-center gap-6 flex-1 max-w-3xl">
-                        <div className="flex items-center gap-2 text-sm text-green-500 font-medium tracking-wide whitespace-nowrap">
-                            <Shield size={16} /> <span className="hidden lg:inline">Backend Authorized  •  BC Integrated</span>
-                        </div>
-                        <UniversalSearchBar />
-                    </div>
-                    <div className="flex items-center gap-4">
-                        <button 
-                            onClick={() => setIsQRScannerOpen(true)}
-                            className="flex items-center gap-2 px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-black rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-lg shadow-emerald-900/20"
-                        >
-                            <QrCode size={16} /> Scan Patient QR
-                        </button>
-                        <button 
-                            onClick={() => setIsDelayModalOpen(true)}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${user?.delayStatus?.isDelayed ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20 shadow-[0_0_15px_rgba(245,158,11,0.1)]' : 'bg-gray-800/50 text-gray-400 hover:text-white border border-white/5'}`}
-                        >
-                            <Clock size={16} /> 
-                            {user?.delayStatus?.isDelayed ? 'DELAY REPORTED' : 'REPORT DELAY'}
-                        </button>
-                        <NotificationBell count={notificationCount} onClick={resetNotifications} />
-                        <div className="flex items-center gap-3">
-                            <div className="text-right">
-                                <p className="text-sm font-bold text-white">Dr. {user?.name || 'Doctor'}</p>
-                                <p className="text-[10px] text-gray-500 uppercase tracking-tighter leading-tight font-medium">{user?.hospitalName || 'Medicare Partner'}</p>
-                                <p className="text-[9px] text-emerald-500/80 uppercase font-black tracking-widest mt-0.5">{user?.role}</p>
+                {/* Single shared scrollable area (enables consistent scroll-driven header animation) */}
+                <div
+                    ref={mainScrollRef}
+                    className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain scroll-smooth custom-scrollbar"
+                    style={{ WebkitOverflowScrolling: 'touch' }}
+                >
+                    {/* ─── STICKY ANIMATED HEADER AREA (shows on scroll-up, hides on scroll-down) ─── */}
+                    <div
+                        className={`sticky top-0 z-30 bg-[#0a0a0a] will-change-transform transition-all duration-[320ms] ease-out ${
+                            headerVisible
+                                ? 'translate-y-0 opacity-100'
+                                : '-translate-y-full opacity-0 pointer-events-none sm:translate-y-0 sm:opacity-100 sm:pointer-events-auto'
+                        } ${headerShadow
+                            ? 'sm:shadow-none shadow-[0_8px_30px_rgb(0,0,0,0.5)] border-b border-gray-800/80 backdrop-blur-xl bg-[#0a0a0a]/92'
+                            : 'border-b border-transparent'
+                        }`}
+                    >
+                        {/* ── HEADER ── */}
+                        <header className="relative">
+
+                            {/* ─── MOBILE HEADER (sm:hidden) — dark theme, compact action buttons ─── */}
+                            <div className="sm:hidden px-4 py-4 flex items-center justify-between gap-3">
+                                {/* Left: Avatar + Greeting + Doctor Name */}
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                    <div className="relative">
+                                        <div
+                                            data-profile-toggle
+                                            onClick={() => setIsProfileMenuOpen((o) => !o)}
+                                            className="w-11 h-11 rounded-full bg-[#1a1a1a] p-[1.5px] flex-shrink-0 ring-2 ring-emerald-500/20 border border-emerald-500/10 cursor-pointer"
+                                        >
+                                            <div className="w-full h-full rounded-full bg-[#111] flex items-center justify-center overflow-hidden">
+                                                {user?.profileImage ? (
+                                                    <img src={`${getBaseUrl()}/${user.profileImage}`} alt="Profile" className="w-full h-full object-cover" />
+                                                ) : (
+                                                    <User size={20} className="text-gray-300" />
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {isProfileMenuOpen && (
+                                            <div
+                                                data-profile-menu
+                                                className="absolute left-0 top-[calc(100%+10px)] w-64 bg-[#111] border border-gray-800 rounded-2xl shadow-2xl shadow-black/60 overflow-hidden z-50 animate-in"
+                                            >
+                                                <div className="px-4 py-3 border-b border-gray-800/80">
+                                                    <p className="text-sm font-bold text-white truncate">Dr. {user?.name || 'Doctor'}</p>
+                                                    <p className="text-[11px] text-gray-500 truncate">{user?.email || 'doctor@medicare.app'}</p>
+                                                    <p className="text-[10px] text-emerald-500/80 uppercase tracking-widest font-black mt-1">{user?.specialization || 'Physician'}</p>
+                                                </div>
+                                                <div className="py-1.5">
+                                                    <button
+                                                        onClick={() => { setActiveTab('settings'); setIsProfileMenuOpen(false); }}
+                                                        className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-gray-300 hover:bg-white/5 hover:text-white transition-colors"
+                                                    >
+                                                        <Settings size={17} className="text-gray-500" />
+                                                        <span>Settings & Profile</span>
+                                                    </button>
+                                                </div>
+                                                <div className="border-t border-gray-800/80 pt-1.5 pb-2 mt-0.5">
+                                                    <button
+                                                        onClick={() => { setIsProfileMenuOpen(false); logout(); }}
+                                                        className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors"
+                                                    >
+                                                        <LogOut size={17} />
+                                                        <span className="font-semibold">Logout</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                        <p className="text-sm text-gray-400 font-medium leading-tight flex items-center gap-1">
+                                            {(() => {
+                                                const h = new Date().getHours();
+                                                return h < 12 ? 'Good morning 👋' : h < 18 ? 'Good afternoon ☀️' : 'Good evening 🌙';
+                                            })()}
+                                        </p>
+                                        <p className="font-bold text-white text-lg leading-tight truncate">
+                                            Dr. {user?.name || 'Doctor'}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {/* Right: Compact action buttons row — Scan QR → Report Delay → Notification */}
+                                <div className="flex items-center gap-1.5 flex-shrink-0">
+                                    {/* Scan QR */}
+                                    <button
+                                        onClick={() => setIsQRScannerOpen(true)}
+                                        title="Scan Patient QR"
+                                        className="flex flex-col items-center justify-center gap-0.5 w-[60px] h-[54px] rounded-xl bg-[#111] border border-gray-800 text-gray-300 hover:text-white hover:border-emerald-500/30 active:scale-95 transition-all duration-200 hover:shadow-[0_0_0_1px_rgba(16,185,129,0.15),0_8px_20px_-10px_rgba(16,185,129,0.25)]"
+                                    >
+                                        <QrCode size={18} strokeWidth={2} />
+                                        <span className="text-[10px] font-semibold leading-none mt-0.5">Scan QR</span>
+                                    </button>
+
+                                    {/* Report Delay */}
+                                    <button
+                                        onClick={() => setIsDelayModalOpen(true)}
+                                        title="Report Delay"
+                                        className={`flex flex-col items-center justify-center gap-0.5 w-[72px] h-[54px] rounded-xl border transition-all duration-200 active:scale-95 ${user?.delayStatus?.isDelayed
+                                            ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:text-amber-300 hover:bg-amber-500/15 hover:shadow-[0_0_0_1px_rgba(245,158,11,0.2)]'
+                                            : 'bg-[#111] border-gray-800 text-amber-500/80 hover:text-amber-400 hover:border-gray-700 hover:shadow-[0_0_0_1px_rgba(245,158,11,0.1)]'
+                                            }`}
+                                    >
+                                        <Clock size={18} strokeWidth={2} />
+                                        <span className="text-[10px] font-bold leading-none mt-0.5">
+                                            {user?.delayStatus?.isDelayed ? 'Report Delay' : 'Report Delay'}
+                                        </span>
+                                    </button>
+
+                                    {/* Notification Bell */}
+                                    <div className="flex h-[54px] w-[50px] items-center justify-center rounded-xl border border-gray-800 bg-[#111]">
+                                        <NotificationBell count={notificationCount} notifications={notifications} onClick={resetNotifications} onMarkRead={markNotificationRead} />
+                                    </div>
+                                </div>
                             </div>
-                            <div className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center border border-gray-700 overflow-hidden ring-2 ring-emerald-500/10">
-                                {user?.profileImage ? (
-                                    <img src={`${getBaseUrl()}/${user.profileImage}`} alt="Profile" className="w-full h-full object-cover" />
-                                ) : (
-                                    <User size={20} className="text-gray-400" />
-                                )}
+
+                            {/* ─── DESKTOP HEADER (hidden sm:flex) — preserve existing layout ─── */}
+                            <div className="hidden sm:flex h-16 items-center justify-between px-8">
+                                {/* Left: BC badge + search */}
+                                <div className="flex items-center gap-6 flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 text-sm text-green-500 font-medium tracking-wide whitespace-nowrap">
+                                        <Shield size={16} className="flex-shrink-0" />
+                                        <span className="hidden lg:inline">Backend Authorized  •  BC Integrated</span>
+                                    </div>
+                                    <div className="hidden md:block flex-1 min-w-0">
+                                        <UniversalSearchBar />
+                                    </div>
+                                </div>
+
+                                {/* Right: QR + delay + notifications + identity */}
+                                <div className="flex items-center gap-4 flex-shrink-0">
+                                    <button
+                                        onClick={() => setIsQRScannerOpen(true)}
+                                        className="flex items-center gap-2 px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-black rounded-xl text-xs font-black uppercase tracking-widest transition-all duration-200 shadow-lg shadow-emerald-900/20 hover:shadow-emerald-900/40 hover:-translate-y-0.5"
+                                    >
+                                        <QrCode size={16} />
+                                        <span>Scan Patient QR</span>
+                                    </button>
+                                    <button
+                                        onClick={() => setIsDelayModalOpen(true)}
+                                        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all duration-200 ${user?.delayStatus?.isDelayed ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20 shadow-[0_0_15px_rgba(245,158,11,0.1)]' : 'bg-gray-800/50 text-gray-400 hover:text-white border border-white/5 hover:-translate-y-0.5'}`}
+                                    >
+                                        <Clock size={16} />
+                                        {user?.delayStatus?.isDelayed ? 'DELAY REPORTED' : 'REPORT DELAY'}
+                                    </button>
+                                    <NotificationBell count={notificationCount} notifications={notifications} onClick={resetNotifications} onMarkRead={markNotificationRead} />
+                                    <div className="relative">
+                                        <div
+                                            data-profile-toggle
+                                            onClick={() => setIsProfileMenuOpen((o) => !o)}
+                                            className="flex items-center gap-3 cursor-pointer"
+                                        >
+                                            <div className="text-right">
+                                                <p className="text-sm font-bold text-white">Dr. {user?.name || 'Doctor'}</p>
+                                                <p className="text-[10px] text-gray-500 uppercase tracking-tighter leading-tight font-medium hidden md:block">{user?.hospitalName || 'Medicare Partner'}</p>
+                                            </div>
+                                            <div className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center border border-gray-700 overflow-hidden ring-2 ring-emerald-500/10">
+                                                {user?.profileImage ? (
+                                                    <img src={`${getBaseUrl()}/${user.profileImage}`} alt="Profile" className="w-full h-full object-cover" />
+                                                ) : (
+                                                    <User size={20} className="text-gray-400" />
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {isProfileMenuOpen && (
+                                            <div
+                                                data-profile-menu
+                                                className="absolute right-0 top-[calc(100%+10px)] w-64 bg-[#111] border border-gray-800 rounded-2xl shadow-2xl shadow-black/60 overflow-hidden z-50 animate-in"
+                                            >
+                                                <div className="px-4 py-3 border-b border-gray-800/80">
+                                                    <p className="text-sm font-bold text-white truncate">Dr. {user?.name || 'Doctor'}</p>
+                                                    <p className="text-[11px] text-gray-500 truncate">{user?.email || 'doctor@medicare.app'}</p>
+                                                    <p className="text-[10px] text-emerald-500/80 uppercase tracking-widest font-black mt-1">{user?.specialization || 'Physician'}</p>
+                                                </div>
+                                                <div className="py-1.5">
+                                                    <button
+                                                        onClick={() => { setActiveTab('settings'); setIsProfileMenuOpen(false); }}
+                                                        className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-gray-300 hover:bg-white/5 hover:text-white transition-colors"
+                                                    >
+                                                        <Settings size={17} className="text-gray-500" />
+                                                        <span>Settings & Profile</span>
+                                                    </button>
+                                                </div>
+                                                <div className="border-t border-gray-800/80 pt-1.5 pb-2 mt-0.5">
+                                                    <button
+                                                        onClick={() => { setIsProfileMenuOpen(false); logout(); }}
+                                                        className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors"
+                                                    >
+                                                        <LogOut size={17} />
+                                                        <span className="font-semibold">Logout</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
                             </div>
+                        </header>
+
+                        {/* Mobile Search Bar — visible directly below header on mobile only, dark theme, polished */}
+                        <div className="sm:hidden px-4 pt-0 pb-3">
+                            <div className="doctor-mobile-search-wrapper transition-all duration-300 hover:scale-[1.005]">
+                                <UniversalSearchBar />
+                            </div>
+                            <style>{`
+                                .doctor-mobile-search-wrapper > div { max-width: 100% !important; width: 100% !important; }
+                                .doctor-mobile-search-wrapper input {
+                                    width: 100% !important;
+                                    background: linear-gradient(180deg, #131313 0%, #0f0f0f 100%) !important;
+                                    border: 1px solid #202020 !important;
+                                    border-radius: 1rem !important;
+                                    padding: 0.9rem 2.75rem 0.9rem 3rem !important;
+                                    font-size: 15px !important;
+                                    color: #fff !important;
+                                    box-shadow: 
+                                        0 10px 30px -14px rgba(0,0,0,0.7),
+                                        inset 0 1px 0 rgba(255,255,255,0.03) !important;
+                                    transition: all 0.2s ease !important;
+                                }
+                                .doctor-mobile-search-wrapper input::placeholder { color: #5b5b63 !important; }
+                                .doctor-mobile-search-wrapper input:focus {
+                                    border-color: rgba(16,185,129,0.25) !important;
+                                    box-shadow: 
+                                        0 0 0 1px rgba(16,185,129,0.12),
+                                        0 14px 36px -16px rgba(16,185,129,0.25) !important;
+                                }
+                                .doctor-mobile-search-wrapper > div > div > svg:first-child { left: 1.1rem !important; width: 19px !important; height: 19px !important; color: #5b5b63 !important; }
+                            `}</style>
                         </div>
                     </div>
-                </header>
+                    {/* end sticky animated header area */}
+
+                    {/* Bottom padding placeholder so content not hidden by bottom nav (mobile), normal desktop padding */}
+                    <div className="tab-content-wrapper pb-32 lg:pb-8">
 
                 {activeTab === 'availability' && (
-                    <div className="flex-1 overflow-auto p-8 bg-[#0a0a0a]">
+                    <div className="p-4 sm:p-8 bg-[#0a0a0a] tab-section">
                         <DoctorAvailability />
                     </div>
                 )}
 
                 {activeTab === 'settings' && (
-                    <div className="flex-1 overflow-auto p-8 bg-[#0a0a0a]">
+                    <div className="p-4 sm:p-8 bg-[#0a0a0a] tab-section">
                         <SettingsView />
                     </div>
                 )}
 
                 {activeTab === 'patients' && (
-                    <div className="flex-1 overflow-auto p-8 bg-[#0a0a0a]">
-                        <h2 className="text-3xl font-bold mb-6">My Patients (Under Medication)</h2>
+                    <div className="p-4 sm:p-8 bg-[#0a0a0a] tab-section">
+                        <h2 className="text-2xl sm:text-3xl font-bold mb-6">My Patients (Under Medication)</h2>
                         {loadingData ? (
                             <div className="flex items-center justify-center p-12">
                                 <Loader2 className="animate-spin text-green-500 w-10 h-10" />
@@ -514,10 +895,12 @@ const DoctorDashboard = () => {
                         ) : (
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                                 {patients.map((p) => (
-                                    <div key={p._id} className="bg-[#111] border border-gray-800 rounded-2xl p-6 hover:border-green-500/50 transition-colors">
+                                    <div key={p._id} className="group relative bg-[#111] border border-gray-800 rounded-2xl p-6
+                                        transition-all duration-300 ease-out
+                                        hover:border-emerald-500/40 hover:shadow-[0_16px_44px_-20px_rgba(16,185,129,0.25),0_10px_30px_-18px_rgba(0,0,0,0.7)] hover:-translate-y-0.5">
                                         <div className="flex items-center gap-4 mb-4">
-                                            <div className="w-12 h-12 rounded-full bg-gray-800 flex items-center justify-center border border-gray-700">
-                                                <User size={24} className="text-gray-400" />
+                                            <div className="w-12 h-12 rounded-full bg-gray-800 flex items-center justify-center border border-gray-700 transition-all duration-300 group-hover:border-emerald-500/40 group-hover:scale-105">
+                                                <User size={24} className="text-gray-400 transition-colors duration-300 group-hover:text-emerald-400" />
                                             </div>
                                             <div>
                                                 <h3 className="font-bold text-lg">{p.name}</h3>
@@ -537,7 +920,7 @@ const DoctorDashboard = () => {
                                         <div className="flex gap-2">
                                             <button
                                                 onClick={() => handleViewHistory(p._id, p.name)}
-                                                className="flex-1 bg-blue-500/10 hover:bg-blue-500/20 text-blue-500 text-xs font-bold py-2 rounded-lg transition-colors"
+                                                className="flex-1 bg-blue-500/10 hover:bg-blue-500/20 text-blue-500 text-xs font-bold py-2.5 rounded-xl transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] hover:shadow-[0_6px_20px_-8px_rgba(59,130,246,0.5)]"
                                             >
                                                 History
                                             </button>
@@ -546,7 +929,7 @@ const DoctorDashboard = () => {
                                                     setLabOrderForm({ ...labOrderForm, patientId: p._id });
                                                     setIsLabTestModalOpen(true);
                                                 }}
-                                                className="flex-1 bg-green-500/10 hover:bg-green-500/20 text-green-500 text-xs font-bold py-2 rounded-lg transition-colors"
+                                                className="flex-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-500 text-xs font-bold py-2.5 rounded-xl transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] hover:shadow-[0_6px_20px_-8px_rgba(16,185,129,0.5)]"
                                             >
                                                 Lab Test
                                             </button>
@@ -555,7 +938,7 @@ const DoctorDashboard = () => {
                                                     setPrescriptionForm({ ...initialPrescriptionForm, patientId: p._id });
                                                     setIsPrescriptionModalOpen(true);
                                                 }}
-                                                className="flex-1 bg-purple-500/10 hover:bg-purple-500/20 text-purple-500 text-xs font-bold py-2 rounded-lg transition-colors"
+                                                className="flex-1 bg-purple-500/10 hover:bg-purple-500/20 text-purple-500 text-xs font-bold py-2.5 rounded-xl transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] hover:shadow-[0_6px_20px_-8px_rgba(168,85,247,0.5)]"
                                             >
                                                 Prescribe
                                             </button>
@@ -574,9 +957,9 @@ const DoctorDashboard = () => {
                 )}
 
                 {activeTab === 'appointments' && (
-                    <div className="flex-1 overflow-auto p-8 bg-[#0a0a0a]">
-                        <div className="flex justify-between items-center mb-6">
-                            <h2 className="text-3xl font-bold">Appointments</h2>
+                    <div className="p-4 sm:p-8 bg-[#0a0a0a] tab-section">
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                            <h2 className="text-2xl sm:text-3xl font-bold">Appointments</h2>
                             {user?.delayStatus?.isDelayed && (
                                 <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl flex items-center gap-4 animate-in slide-in-from-right-4 duration-500 shadow-xl shadow-amber-900/5">
                                     <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center border border-amber-500/30">
@@ -588,7 +971,7 @@ const DoctorDashboard = () => {
                                             ETA: <span className="text-white font-bold">{user.delayStatus.expectedArrivalTime}</span> • "{user.delayStatus.reason}"
                                         </p>
                                     </div>
-                                    <button 
+                                    <button
                                         onClick={() => setIsDelayModalOpen(true)}
                                         className="ml-2 p-2 hover:bg-white/5 rounded-lg text-amber-500 transition-colors"
                                         title="Update Status"
@@ -609,52 +992,69 @@ const DoctorDashboard = () => {
                                     {appointments.filter(a => a.status === 'pending')
                                         .sort((a, b) => (b.priority || 0) - (a.priority || 0))
                                         .map(app => (
-                                        <div key={app._id} className={`bg-[#1a1a1a] rounded-xl border p-4 ${app.isEmergency ? 'border-red-500/30 bg-red-500/[0.02]' : 'border-gray-800'}`}>
-                                            <div className="flex justify-between items-start mb-2">
-                                                <div>
-                                                    <div className="flex items-center gap-2">
-                                                        <h4 className="font-bold text-lg">{app.patientId?.name || 'Unknown Patient'}</h4>
-                                                        {app.isEmergency && (
-                                                            <span className="bg-red-600 text-white text-[8px] font-black px-1.5 py-0.5 rounded animate-pulse shadow-lg shadow-red-900/20">
-                                                                EMERGENCY
-                                                            </span>
-                                                        )}
+                                            <div key={app._id} className={`group relative rounded-xl border p-4
+                                                transition-all duration-300 ease-out
+                                                hover:shadow-[0_10px_34px_-16px_rgba(0,0,0,0.8)] hover:-translate-y-0.5
+                                                ${app.isEmergency
+                                                    ? 'border-red-500/30 bg-red-500/[0.02] hover:border-red-500/50 hover:shadow-[0_10px_34px_-16px_rgba(239,68,68,0.35)]'
+                                                    : 'bg-[#1a1a1a] border-gray-800 hover:border-gray-700'}`}>
+                                                <div className="flex justify-between items-start mb-2">
+                                                    <div>
+                                                        <div className="flex items-center gap-2">
+                                                            <h4 className="font-bold text-lg">{app.patientId?.name || 'Unknown Patient'}</h4>
+                                                            {app.isEmergency && (
+                                                                <span className="bg-red-600 text-white text-[8px] font-black px-1.5 py-0.5 rounded animate-pulse shadow-lg shadow-red-900/20">
+                                                                    EMERGENCY
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <p className="text-gray-300 text-sm">
+                                                            {new Date(app.date).toLocaleDateString()} at {app.time}
+                                                        </p>
                                                     </div>
-                                                    <p className="text-gray-300 text-sm">
-                                                        {new Date(app.date).toLocaleDateString()} at {app.time}
-                                                    </p>
+                                                    <span className="bg-yellow-500/10 text-yellow-500 text-[10px] font-bold px-2 py-1 rounded">PENDING</span>
                                                 </div>
-                                                <span className="bg-yellow-500/10 text-yellow-500 text-[10px] font-bold px-2 py-1 rounded">PENDING</span>
-                                            </div>
-                                            
-                                            {app.isEmergency && app.emergencyReason && (
-                                                <div className="mt-2 p-2.5 bg-red-500/5 border border-red-500/10 rounded-lg mb-4">
-                                                    <p className="text-[10px] font-black text-red-500/80 uppercase tracking-widest mb-1">Emergency Reason</p>
-                                                    <p className="text-xs text-gray-300 italic">"{app.emergencyReason}"</p>
-                                                </div>
-                                            )}
-                                            {!app.isEmergency && app.reason && (
-                                                <p className="text-gray-500 text-sm mb-4 italic">"{app.reason}"</p>
-                                            )}
 
-                                            <div className="flex gap-2">
-                                                <button
-                                                    onClick={() => handleAppointmentStatus(app._id, 'approved')}
-                                                    disabled={statusLoadingId === app._id}
-                                                    className="flex-1 bg-green-600 hover:bg-green-500 text-white py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
-                                                >
-                                                    {statusLoadingId === app._id ? '...' : 'Approve'}
-                                                </button>
-                                                <button
-                                                    onClick={() => handleAppointmentStatus(app._id, 'rejected')}
-                                                    disabled={statusLoadingId === app._id}
-                                                    className="flex-1 bg-transparent border border-red-500/50 hover:bg-red-500/10 text-red-500 py-2 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
-                                                >
-                                                    Reject
-                                                </button>
+                                                {app.isEmergency && app.emergencyReason && (
+                                                    <div className="mt-2 p-2.5 bg-red-500/5 border border-red-500/10 rounded-lg mb-4">
+                                                        <p className="text-[10px] font-black text-red-500/80 uppercase tracking-widest mb-1">Emergency Reason</p>
+                                                        <p className="text-xs text-gray-300 italic">"{app.emergencyReason}"</p>
+                                                    </div>
+                                                )}
+                                                {!app.isEmergency && app.reason && (
+                                                    <p className="text-gray-500 text-sm mb-4 italic">"{app.reason}"</p>
+                                                )}
+
+                                                <div className="flex flex-wrap gap-2">
+                                                    <button
+                                                        onClick={() => handleAppointmentStatus(app._id, 'approved')}
+                                                        disabled={statusLoadingId === app._id}
+                                                        className="flex-1 min-w-[80px] bg-emerald-600 hover:bg-emerald-500 text-white py-2.5 rounded-xl text-sm font-bold transition-all duration-200 disabled:opacity-50 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] hover:shadow-[0_6px_20px_-8px_rgba(16,185,129,0.6)]"
+                                                    >
+                                                        {statusLoadingId === app._id ? '...' : 'Approve'}
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleAppointmentStatus(app._id, 'rejected')}
+                                                        disabled={statusLoadingId === app._id}
+                                                        className="flex-1 min-w-[80px] bg-transparent border border-red-500/50 hover:bg-red-500/10 text-red-500 py-2.5 rounded-xl text-sm font-bold transition-all duration-200 disabled:opacity-50 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] hover:border-red-500/70"
+                                                    >
+                                                        Reject
+                                                    </button>
+                                                    <button
+                                                        onClick={() => {
+                                                            setSelectedDelayAppointmentId(app._id);
+                                                            setIsDelayModalOpen(true);
+                                                        }}
+                                                        className={`w-full sm:flex-1 sm:min-w-[100px] flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-xs font-bold transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] ${['pending', 'accepted'].includes(app.delayRequestStatus)
+                                                            ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30 hover:bg-amber-500/20'
+                                                            : 'bg-gray-800/50 text-gray-400 hover:text-white hover:bg-gray-800 border border-gray-700 hover:border-gray-600'}`}
+                                                    >
+                                                        <Clock size={14} />
+                                                        {['pending', 'accepted'].includes(app.delayRequestStatus) ? 'Delay Active' : 'Report Delay'}
+                                                    </button>
+                                                </div>
                                             </div>
-                                        </div>
-                                    ))}
+                                        ))}
                                     {appointments.filter(a => a.status === 'pending').length === 0 && (
                                         <p className="text-gray-500 text-center py-4">No pending requests.</p>
                                     )}
@@ -672,109 +1072,135 @@ const DoctorDashboard = () => {
                                             // 1. Status: Active (approved) always above Completed
                                             if (a.status === 'approved' && b.status === 'completed') return -1;
                                             if (a.status === 'completed' && b.status === 'approved') return 1;
-                                            
+
                                             // 2. Emergency & Priority: Absolute top priority
                                             const aPriority = (a.isEmergency ? 100 : 0) + (a.priority || 0);
                                             const bPriority = (b.isEmergency ? 100 : 0) + (b.priority || 0);
-                                            
+
                                             if (bPriority !== aPriority) {
                                                 return bPriority - aPriority;
                                             }
-                                            
+
                                             // 3. Date & Time: Earliest first for same priority
                                             const dateA = new Date(`${a.date} ${a.time}`);
                                             const dateB = new Date(`${b.date} ${b.time}`);
                                             return dateA - dateB;
                                         })
                                         .map(app => (
-                                        <div key={app._id} className={`flex flex-col p-4 bg-[#1a1a1a] rounded-xl border hover:border-green-500/30 transition-colors ${app.status === 'completed' ? 'opacity-50 border-gray-800' : 'border-gray-800'} ${app.isEmergency && app.status !== 'completed' ? 'ring-1 ring-red-500/30 bg-red-500/[0.02]' : ''}`}>
-                                            <div className="flex items-center justify-between mb-3">
-                                                <div className="flex items-center gap-4">
-                                                    <div className={`w-10 h-10 rounded-full flex items-center justify-center border ${app.isEmergency && app.status !== 'completed' ? 'bg-red-500/10 border-red-500/20' : 'bg-green-500/10 border-green-500/20'}`}>
-                                                        <User size={18} className={app.isEmergency && app.status !== 'completed' ? 'text-red-500' : 'text-green-500'} />
-                                                    </div>
-                                                    <div className="flex flex-col">
-                                                        <div className="flex items-center gap-2">
-                                                            <h4 className={`font-bold text-sm ${app.status === 'completed' ? 'line-through text-gray-400' : ''}`}>{app.patientId?.name}</h4>
-                                                            {app.isEmergency && app.status !== 'completed' && (
-                                                                <span className={`text-white text-xs font-black px-1.5 py-0.5 rounded animate-pulse shadow-lg ${app.priority > 1 ? 'bg-red-600 shadow-red-900/40 ring-1 ring-white/20' : 'bg-red-500 shadow-red-900/20'}`}>
-                                                                    {app.priority > 1 ? '🔥 HIGH PRIORITY EMERGENCY' : 'EMERGENCY'}
-                                                                </span>
-                                                            )}
-                                                            {app.status === 'completed' && (
-                                                                <span className="bg-green-600/20 text-green-500 text-xs font-black px-1.5 py-0.5 rounded">
-                                                                    COMPLETED
-                                                                </span>
-                                                            )}
+                                            <div key={app._id} className={`flex flex-col p-4 bg-[#1a1a1a] rounded-xl border hover:border-green-500/30 transition-colors ${app.status === 'completed' ? 'opacity-50 border-gray-800' : 'border-gray-800'} ${app.isEmergency && app.status !== 'completed' ? 'ring-1 ring-red-500/30 bg-red-500/[0.02]' : ''}`}>
+                                                <div className="flex items-center justify-between mb-3">
+                                                    <div className="flex items-center gap-4">
+                                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center border ${app.isEmergency && app.status !== 'completed' ? 'bg-red-500/10 border-red-500/20' : 'bg-green-500/10 border-green-500/20'}`}>
+                                                            <User size={18} className={app.isEmergency && app.status !== 'completed' ? 'text-red-500' : 'text-green-500'} />
                                                         </div>
-                                                        <p className="text-xs text-gray-500">{app.time} • {new Date(app.date).toLocaleDateString()}</p>
+                                                        <div className="flex flex-col">
+                                                            <div className="flex items-center gap-2">
+                                                                <h4 className={`font-bold text-sm ${app.status === 'completed' ? 'line-through text-gray-400' : ''}`}>{app.patientId?.name}</h4>
+                                                                {app.isEmergency && app.status !== 'completed' && (
+                                                                    <span className={`text-white text-xs font-black px-1.5 py-0.5 rounded animate-pulse shadow-lg ${app.priority > 1 ? 'bg-red-600 shadow-red-900/40 ring-1 ring-white/20' : 'bg-red-500 shadow-red-900/20'}`}>
+                                                                        {app.priority > 1 ? '🔥 HIGH PRIORITY EMERGENCY' : 'EMERGENCY'}
+                                                                    </span>
+                                                                )}
+                                                                {app.status === 'completed' && (
+                                                                    <span className="bg-green-600/20 text-green-500 text-xs font-black px-1.5 py-0.5 rounded">
+                                                                        COMPLETED
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <p className="text-xs text-gray-500">{app.time} • {new Date(app.date).toLocaleDateString()}</p>
+                                                        </div>
                                                     </div>
-                                                </div>
-                                                <div className="flex gap-2">
-                                                    <button
-                                                        onClick={() => handleViewHistory(app.patientId?._id, app.patientId?.name)}
-                                                        disabled={app.status === 'completed'}
-                                                        className={`p-2 rounded-lg transition-colors ${app.status === 'completed' ? 'bg-gray-500/10 text-gray-600 cursor-not-allowed' : 'bg-blue-500/10 hover:bg-blue-500/20 text-blue-500'}`}
-                                                        title="View History"
-                                                    >
-                                                        <FileText size={18} />
-                                                    </button>
-                                                    <button
-                                                        onClick={() => {
-                                                            setLabOrderForm({ ...labOrderForm, patientId: app.patientId?._id });
-                                                            setIsLabTestModalOpen(true);
-                                                        }}
-                                                        disabled={app.status === 'completed'}
-                                                        className={`p-2 rounded-lg transition-colors ${app.status === 'completed' ? 'bg-gray-500/10 text-gray-600 cursor-not-allowed' : 'bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-500'}`}
-                                                        title="Order Lab Test"
-                                                    >
-                                                        <Activity size={18} />
-                                                    </button>
-                                                    <button
-                                                        onClick={() => {
-                                                            setPrescriptionForm({ ...initialPrescriptionForm, patientId: app.patientId?._id });
-                                                            setIsPrescriptionModalOpen(true);
-                                                        }}
-                                                        disabled={app.status === 'completed'}
-                                                        className={`p-2 rounded-lg transition-colors ${app.status === 'completed' ? 'bg-gray-500/10 text-gray-600 cursor-not-allowed' : 'bg-purple-500/10 hover:bg-purple-500/20 text-purple-500'}`}
-                                                        title="Issue Prescription"
-                                                    >
-                                                        <ClipboardList size={18} />
-                                                    </button>
-                                                    {app.status !== 'completed' ? (
+                                                    <div className="flex flex-wrap gap-2">
                                                         <button
-                                                            onClick={() => handleAppointmentStatus(app._id, 'completed')}
-                                                            disabled={statusLoadingId === app._id}
-                                                            className="p-2 bg-green-500/10 hover:bg-green-500/30 text-green-500 rounded-lg transition-colors"
-                                                            title="Mark Completed"
+                                                            onClick={() => handleViewHistory(app.patientId?._id, app.patientId?.name)}
+                                                            disabled={app.status === 'completed'}
+                                                            className={`p-2 rounded-lg transition-colors ${app.status === 'completed' ? 'bg-gray-500/10 text-gray-600 cursor-not-allowed' : 'bg-blue-500/10 hover:bg-blue-500/20 text-blue-500'}`}
+                                                            title="View History"
                                                         >
-                                                            {statusLoadingId === app._id ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />}
+                                                            <FileText size={18} />
                                                         </button>
-                                                    ) : (
                                                         <button
-                                                            disabled
-                                                            className="p-2 bg-gray-500/10 text-gray-600 rounded-lg cursor-not-allowed"
+                                                            onClick={() => {
+                                                                setLabOrderForm({ ...labOrderForm, patientId: app.patientId?._id });
+                                                                setIsLabTestModalOpen(true);
+                                                            }}
+                                                            disabled={app.status === 'completed'}
+                                                            className={`p-2 rounded-lg transition-colors ${app.status === 'completed' ? 'bg-gray-500/10 text-gray-600 cursor-not-allowed' : 'bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-500'}`}
+                                                            title="Order Lab Test"
                                                         >
-                                                            <CheckCircle size={18} />
+                                                            <Activity size={18} />
                                                         </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                setPrescriptionForm({ ...initialPrescriptionForm, patientId: app.patientId?._id });
+                                                                setIsPrescriptionModalOpen(true);
+                                                            }}
+                                                            disabled={app.status === 'completed'}
+                                                            className={`p-2 rounded-lg transition-colors ${app.status === 'completed' ? 'bg-gray-500/10 text-gray-600 cursor-not-allowed' : 'bg-purple-500/10 hover:bg-purple-500/20 text-purple-500'}`}
+                                                            title="Issue Prescription"
+                                                        >
+                                                            <ClipboardList size={18} />
+                                                        </button>
+                                                        {app.status !== 'completed' ? (
+                                                            <button
+                                                                onClick={() => handleAppointmentStatus(app._id, 'completed')}
+                                                                disabled={statusLoadingId === app._id}
+                                                                className="p-2 bg-green-500/10 hover:bg-green-500/30 text-green-500 rounded-lg transition-colors"
+                                                                title="Mark Completed"
+                                                            >
+                                                                {statusLoadingId === app._id ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />}
+                                                            </button>
+                                                        ) : (
+                                                            <button
+                                                                disabled
+                                                                className="p-2 bg-gray-500/10 text-gray-600 rounded-lg cursor-not-allowed"
+                                                            >
+                                                                <CheckCircle size={18} />
+                                                            </button>
+                                                        )}
+                                                        {app.status !== 'completed' && (
+                                                            <button
+                                                                onClick={() => {
+                                                                    setSelectedDelayAppointmentId(app._id);
+                                                                    setIsDelayModalOpen(true);
+                                                                }}
+                                                                className={`sm:hidden flex-1 min-w-[110px] flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg text-xs font-bold transition-all ${['pending', 'accepted'].includes(app.delayRequestStatus) ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30' : 'bg-gray-800/50 text-gray-400 hover:text-white hover:bg-gray-800 border border-gray-700'}`}
+                                                            >
+                                                                <Clock size={14} />
+                                                                {['pending', 'accepted'].includes(app.delayRequestStatus) ? 'Delay On' : 'Report Delay'}
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                    {app.status !== 'completed' && (
+                                                        <div className="hidden sm:block mt-2">
+                                                            <button
+                                                                onClick={() => {
+                                                                    setSelectedDelayAppointmentId(app._id);
+                                                                    setIsDelayModalOpen(true);
+                                                                }}
+                                                                className={`w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${['pending', 'accepted'].includes(app.delayRequestStatus) ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30' : 'bg-gray-800/50 text-gray-400 hover:text-white hover:bg-gray-800 border border-gray-700'}`}
+                                                            >
+                                                                <Clock size={14} />
+                                                                {['pending', 'accepted'].includes(app.delayRequestStatus) ? 'Delay Reported — Click to Update' : 'Report Delay'}
+                                                            </button>
+                                                        </div>
                                                     )}
                                                 </div>
+
+                                                {app.isEmergency && app.emergencyReason && (
+                                                    <div className="mt-1 p-2.5 bg-red-500/5 border border-red-500/10 rounded-lg">
+                                                        <p className="text-xs font-black text-red-500/80 uppercase tracking-widest mb-1">Emergency Reason</p>
+                                                        <p className="text-xs text-gray-300 italic">"{app.emergencyReason}"</p>
+                                                    </div>
+                                                )}
+                                                {!app.isEmergency && app.reason && (
+                                                    <div className="mt-1 p-2.5 bg-white/[0.02] border border-white/5 rounded-lg">
+                                                        <p className="text-xs font-black text-gray-500 uppercase tracking-widest mb-1">Reason</p>
+                                                        <p className="text-xs text-gray-400">"{app.reason}"</p>
+                                                    </div>
+                                                )}
                                             </div>
-                                            
-                                            {app.isEmergency && app.emergencyReason && (
-                                                <div className="mt-1 p-2.5 bg-red-500/5 border border-red-500/10 rounded-lg">
-                                                    <p className="text-xs font-black text-red-500/80 uppercase tracking-widest mb-1">Emergency Reason</p>
-                                                    <p className="text-xs text-gray-300 italic">"{app.emergencyReason}"</p>
-                                                </div>
-                                            )}
-                                            {!app.isEmergency && app.reason && (
-                                                <div className="mt-1 p-2.5 bg-white/[0.02] border border-white/5 rounded-lg">
-                                                    <p className="text-xs font-black text-gray-500 uppercase tracking-widest mb-1">Reason</p>
-                                                    <p className="text-xs text-gray-400">"{app.reason}"</p>
-                                                </div>
-                                            )}
-                                        </div>
-                                    ))}
+                                        ))}
                                     {[...appointments.filter(a => a.status === 'approved'), ...appointments.filter(a => a.status === 'completed')].length === 0 && (
                                         <p className="text-gray-500 text-center py-4">No patients in queue.</p>
                                     )}
@@ -785,8 +1211,8 @@ const DoctorDashboard = () => {
                 )}
 
                 {activeTab === 'overview' && (
-                    <div className="flex-1 overflow-auto p-8 bg-[#0a0a0a]">
-                        <h2 className="text-3xl font-bold mb-6">Overview</h2>
+                    <div className="p-4 sm:p-8 bg-[#0a0a0a] tab-section">
+                        <h2 className="hidden sm:block text-2xl sm:text-3xl font-bold mb-6">Overview</h2>
 
                         {loadingData ? (
                             <div className="flex items-center justify-center p-12">
@@ -794,67 +1220,226 @@ const DoctorDashboard = () => {
                             </div>
                         ) : (
                             <>
-                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-                                    <StatCard 
-                                        icon={Calendar} 
-                                        title="Appointments Today" 
-                                        value={appointments.filter(a => new Date(a.date).toDateString() === new Date().toDateString()).length} 
-                                        color="text-purple-500" 
-                                        bg="bg-purple-500/10" 
+                                {/* Statistics cards — 2x2 on mobile, 2x2 on md, 4-col on lg. Matches reference layout */}
+                                <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6 mb-6 sm:mb-8">
+                                    <StatCard
+                                        icon={Calendar}
+                                        title="Appointments Today"
+                                        value={appointments.filter(a => new Date(a.date).toDateString() === new Date().toDateString()).length}
+                                        color="text-purple-500"
+                                        bg="bg-purple-500/10"
+                                        compact
                                     />
-                                    <StatCard 
-                                        icon={Users} 
-                                        title="Total Patients" 
-                                        value={patients.length} 
-                                        color="text-blue-500" 
-                                        bg="bg-blue-500/10" 
+                                    <StatCard
+                                        icon={Users}
+                                        title="Total Patients"
+                                        value={patients.length}
+                                        color="text-blue-500"
+                                        bg="bg-blue-500/10"
+                                        compact
                                     />
-                                    <StatCard 
-                                        icon={FileText} 
-                                        title="Pending BC Verify" 
-                                        value={overview.pendingRecords} 
-                                        color="text-yellow-500" 
-                                        bg="bg-yellow-500/10" 
+                                    <StatCard
+                                        icon={FileText}
+                                        title="Pending BC Verify"
+                                        value={overview.pendingRecords}
+                                        color="text-yellow-500"
+                                        bg="bg-yellow-500/10"
+                                        compact
                                     />
-                                    <StatCard 
-                                        icon={Database} 
-                                        title="BC Verification" 
-                                        value={`${overview.blockchainVerifiedPercentage}%`} 
-                                        color="text-green-500" 
-                                        bg="bg-green-500/10" 
+                                    <StatCard
+                                        icon={Database}
+                                        title="BC Verify Success"
+                                        value={`${overview.blockchainVerifiedPercentage}%`}
+                                        color="text-green-500"
+                                        bg="bg-green-500/10"
+                                        compact
                                     />
                                 </div>
 
-                                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                                    <div className="lg:col-span-2 space-y-8">
-                                        <div className="bg-[#111] border border-gray-800 rounded-2xl p-6">
-                                            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+                                {/* ─── Emergency Queue (DOCTOR_EMERGENCY cases) ─── */}
+                                <div className="mb-6 sm:mb-8">
+                                    <div className={`bg-[#111] border rounded-2xl p-4 sm:p-6 ${
+                                        doctorStatus === 'BUSY_WITH_EMERGENCY'
+                                            ? 'border-red-500/40 shadow-[0_0_40px_-12px_rgba(239,68,68,0.45)]'
+                                            : 'border-gray-800'
+                                    }`}>
+                                        <div className="flex flex-wrap items-start justify-between gap-3 mb-4 sm:mb-5">
+                                            <div>
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    <h3 className="text-lg sm:text-xl font-bold flex items-center gap-2">
+                                                        <AlertTriangle className={`${doctorStatus === 'BUSY_WITH_EMERGENCY' ? 'text-red-500 animate-pulse' : 'text-red-500'}`} /> Emergency Queue
+                                                    </h3>
+                                                    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.14em] ${
+                                                        doctorStatus === 'BUSY_WITH_EMERGENCY'
+                                                            ? 'border-red-500/40 bg-red-500/10 text-red-400'
+                                                            : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                                                    }`}>
+                                                        <span className={`w-1.5 h-1.5 rounded-full ${doctorStatus === 'BUSY_WITH_EMERGENCY' ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'}`} />
+                                                        {doctorStatus === 'BUSY_WITH_EMERGENCY' ? 'Busy With Emergency' : 'Available'}
+                                                    </span>
+                                                </div>
+                                                <p className="mt-1 text-xs text-gray-500">
+                                                    Medical emergencies booked with you — auto-approved. Start treatment immediately.
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        {(() => {
+                                            const drEmergencies = (emergencyCases || []).filter(c =>
+                                                c.responseType === 'DOCTOR_EMERGENCY' &&
+                                                !['CLOSED', 'CANCELLED'].includes(c.status)
+                                            );
+                                            if (drEmergencies.length === 0) {
+                                                return (
+                                                    <div className="rounded-xl border border-dashed border-gray-800 bg-black/20 p-6 text-center">
+                                                        <div className="inline-flex w-12 h-12 items-center justify-center rounded-full border border-emerald-500/20 bg-emerald-500/5 text-emerald-400 mb-3">
+                                                            <CheckCircle size={20} />
+                                                        </div>
+                                                        <p className="text-sm font-semibold text-gray-300">No active medical emergencies</p>
+                                                        <p className="mt-1 text-xs text-gray-500">When a patient books a medical emergency with you, it will appear here ready to start.</p>
+                                                    </div>
+                                                );
+                                            }
+                                            return (
+                                                <div className="space-y-3 sm:space-y-4">
+                                                    {drEmergencies.map(c => {
+                                                        const isReported = c.status === 'REPORTED';
+                                                        const isTreatment = c.status === 'UNDER_TREATMENT';
+                                                        const reported = c.createdAt || (c.statusTimestamps && (c.statusTimestamps.REPORTED || c.statusTimestamps.get?.('REPORTED')));
+                                                        const patient = c.patient || {};
+                                                        const isLoading = emergencyActionLoading === c._id;
+                                                        return (
+                                                            <div key={c._id} className={`group relative rounded-xl border p-4 transition-all duration-300 ${
+                                                                isTreatment
+                                                                    ? 'border-red-500/40 bg-gradient-to-br from-red-500/10 via-[#111] to-[#111]'
+                                                                    : 'border-red-500/20 bg-gradient-to-br from-red-500/[0.06] via-[#111] to-[#111] hover:border-red-500/40 hover:shadow-[0_10px_40px_-18px_rgba(239,68,68,0.45)]'
+                                                            }`}>
+                                                                <div className="flex flex-wrap items-start justify-between gap-4">
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                                                                            <h4 className="font-bold text-white text-base">
+                                                                                {patient.name || 'Unknown Patient'}
+                                                                            </h4>
+                                                                            {c.severity && (
+                                                                                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.14em] ${
+                                                                                    c.severity === 'CRITICAL' ? 'bg-red-600 text-white shadow-lg shadow-red-900/40' :
+                                                                                    c.severity === 'HIGH' ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30' :
+                                                                                    c.severity === 'MODERATE' ? 'bg-yellow-500/15 text-yellow-400 border border-yellow-500/30' :
+                                                                                    'bg-gray-500/10 text-gray-400 border border-gray-500/25'
+                                                                                }`}>
+                                                                                {c.severity}
+                                                                            </span>)}
+                                                                            {isTreatment && (
+                                                                                <span className="inline-flex items-center gap-1.5 rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.14em] text-red-400">
+                                                                                    <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" /> In Progress
+                                                                                </span>
+                                                                            )}
+                                                                            {isReported && (
+                                                                                <span className="inline-flex items-center gap-1.5 rounded-full border border-yellow-500/30 bg-yellow-500/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.14em] text-yellow-400">
+                                                                                    <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" /> Awaiting Start
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                        <p className="text-[11px] text-gray-500 mb-2">
+                                                                            Case #{String(c._id).slice(-6).toUpperCase()} · {c.incidentType?.replace(/_/g, ' ') || 'MEDICAL EMERGENCY'}
+                                                                        </p>
+                                                                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
+                                                                            <span className="flex items-center gap-1"><Clock size={12} /> Reported: {reported ? new Date(reported).toLocaleString() : '—'}</span>
+                                                                            {patient.bloodGroup && <span className="flex items-center gap-1"><Activity size={12} /> Blood: <span className="font-bold text-red-400">{patient.bloodGroup}</span></span>}
+                                                                        </div>
+                                                                        {c.description && (
+                                                                            <p className="mt-2 text-xs text-gray-500 line-clamp-2 border-t border-gray-800/50 pt-2">
+                                                                                {c.description}
+                                                                            </p>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="flex flex-col gap-2 w-full sm:w-auto sm:min-w-[180px]">
+                                                                        {isReported && (
+                                                                            <button
+                                                                                disabled={isLoading}
+                                                                                onClick={() => handleStartEmergency(c._id)}
+                                                                                className="relative overflow-hidden min-h-[44px] rounded-xl bg-gradient-to-br from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white px-4 py-2.5 font-black text-sm tracking-[0.08em] uppercase shadow-lg shadow-red-900/40 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center justify-center gap-2"
+                                                                            >
+                                                                                {isLoading ? <Loader2 className="animate-spin" size={16} /> : null}
+                                                                                <span>Start Emergency</span>
+                                                                            </button>
+                                                                        )}
+                                                                        {isTreatment && (
+                                                                            <button
+                                                                                disabled={isLoading}
+                                                                                onClick={() => handleCompleteEmergency(c._id)}
+                                                                                className="relative overflow-hidden min-h-[44px] rounded-xl bg-gradient-to-br from-emerald-600 to-emerald-700 hover:from-emerald-500 hover:to-emerald-600 text-white px-4 py-2.5 font-black text-sm tracking-[0.08em] uppercase shadow-lg shadow-emerald-900/40 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center justify-center gap-2"
+                                                                            >
+                                                                                {isLoading ? <Loader2 className="animate-spin" size={16} /> : null}
+                                                                                <span>Complete Emergency</span>
+                                                                            </button>
+                                                                        )}
+                                                                        <Link
+                                                                            to={`/doctor-dashboard/emergencies/${c._id}`}
+                                                                            className="text-center min-h-[36px] rounded-xl border border-gray-700 bg-gray-900/40 hover:bg-gray-800/50 hover:border-gray-600 text-gray-300 px-4 py-2 text-xs font-bold tracking-wide transition-colors flex items-center justify-center"
+                                                                        >
+                                                                            View Details
+                                                                        </Link>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-8">
+                                    <div className="lg:col-span-2 space-y-4 sm:space-y-8">
+                                        <div className="bg-[#111] border border-gray-800 rounded-2xl p-4 sm:p-6">
+                                            <h3 className="text-lg sm:text-xl font-bold mb-3 sm:mb-4 flex items-center gap-2">
                                                 <ClipboardList className="text-green-500" /> Administrative Actions
                                             </h3>
-                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                            {/* Stacked on mobile (grid-cols-1), 2-column on sm+ */}
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
                                                 <button
                                                     onClick={() => setIsRecordModalOpen(true)}
-                                                    className="bg-green-600 hover:bg-green-500 text-white p-4 rounded-xl font-medium transition-colors text-left shadow-lg flex justify-between items-center group"
+                                                    className="relative overflow-hidden bg-emerald-600 hover:bg-emerald-500 text-white p-4 sm:p-4 rounded-xl font-bold transition-all duration-300 text-left shadow-lg shadow-emerald-900/30 flex justify-between items-center group
+                                                        hover:shadow-emerald-900/50 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]"
                                                 >
-                                                    Create Medical Record <Plus size={18} className="opacity-70 group-hover:opacity-100" />
+                                                    <span className="absolute inset-0 bg-gradient-to-tr from-white/0 via-white/10 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 ease-out" />
+                                                    <span className="relative">Create Medical Record</span>
+                                                    <Plus size={18} className="relative opacity-80 group-hover:opacity-100 transition-all duration-300 group-hover:translate-x-0.5 group-hover:scale-110" />
                                                 </button>
                                                 <button
                                                     onClick={() => setIsPrescriptionModalOpen(true)}
-                                                    className="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white p-4 rounded-xl font-medium transition-colors text-left flex justify-between items-center group"
+                                                    className="relative overflow-hidden bg-[#162032] hover:bg-[#1a2740] border border-blue-900/40 text-white p-4 sm:p-4 rounded-xl font-bold transition-all duration-300 text-left flex justify-between items-center group
+                                                        hover:border-blue-800/60 hover:shadow-[0_10px_30px_-14px_rgba(59,130,246,0.4)] hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]"
                                                 >
-                                                    Issue Prescription <Plus size={18} className="opacity-70 group-hover:opacity-100" />
+                                                    <span className="absolute inset-0 bg-gradient-to-tr from-white/0 via-white/5 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 ease-out" />
+                                                    <span className="relative">Issue Prescription</span>
+                                                    <Plus size={18} className="relative opacity-80 group-hover:opacity-100 transition-all duration-300 group-hover:translate-x-0.5 group-hover:scale-110" />
                                                 </button>
                                             </div>
                                         </div>
 
                                         {/* APPOINTMENT REQUESTS DECK */}
-                                        <div className="bg-[#111] border border-gray-800 rounded-2xl p-6">
-                                            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
-                                                <Calendar className="text-purple-500" /> Appointment Requests
-                                            </h3>
-                                            <div className="space-y-4">
+                                        <div className="bg-[#111] border border-gray-800 rounded-2xl p-4 sm:p-6">
+                                            <div className="flex items-center justify-between mb-3 sm:mb-4">
+                                                <h3 className="text-lg sm:text-xl font-bold flex items-center gap-2">
+                                                    <Calendar className="text-purple-500" /> Appointment Requests
+                                                </h3>
+                                                <button
+                                                    onClick={() => setActiveTab('appointments')}
+                                                    className="text-[13px] font-bold text-purple-400 hover:text-purple-300 transition-colors px-2 py-1 rounded-lg hover:bg-purple-500/10"
+                                                >
+                                                    View All
+                                                </button>
+                                            </div>
+                                            <div className="space-y-3 sm:space-y-4">
                                                 {appointments.map(app => (
-                                                    <div key={app._id} className="bg-[#1a1a1a] rounded-xl border border-gray-800 p-4">
+                                                    <div key={app._id} className="group relative bg-[#1a1a1a] rounded-xl border border-gray-800 p-4
+                                                        transition-all duration-300 ease-out
+                                                        hover:border-gray-700 hover:shadow-[0_10px_34px_-16px_rgba(0,0,0,0.8)] hover:-translate-y-0.5
+                                                        data-[emergency=true]:hover:border-red-500/40 data-[emergency=true]:hover:shadow-[0_10px_34px_-16px_rgba(239,68,68,0.35)]"
+                                                        data-emergency={app.isEmergency || undefined}>
                                                         <div className="flex justify-between items-start mb-2">
                                                             <div>
                                                                 <div className="flex items-center gap-2">
@@ -881,38 +1466,58 @@ const DoctorDashboard = () => {
                                                         </p>
 
                                                         {app.status === 'pending' && (
-                                                            <div className="flex gap-2 border-t border-gray-800 pt-3">
+                                                            <div className="flex flex-wrap gap-2 border-t border-gray-800 pt-3">
                                                                 <button
                                                                     onClick={() => handleAppointmentStatus(app._id, 'approved')}
                                                                     disabled={statusLoadingId === app._id}
-                                                                    className="bg-green-600 hover:bg-green-500 text-white px-4 py-1.5 rounded text-sm font-bold transition-colors flex-1 disabled:opacity-50"
+                                                                    className="bg-green-600 hover:bg-green-500 text-white px-4 py-1.5 rounded text-sm font-bold transition-colors flex-1 min-w-[80px] disabled:opacity-50"
                                                                 >
                                                                     {statusLoadingId === app._id ? 'Processing...' : 'Approve'}
                                                                 </button>
                                                                 <button
                                                                     onClick={() => handleAppointmentStatus(app._id, 'rejected')}
                                                                     disabled={statusLoadingId === app._id}
-                                                                    className="bg-transparent border border-red-500/50 hover:bg-red-500/10 text-red-500 px-4 py-1.5 rounded text-sm font-bold transition-colors flex-1 disabled:opacity-50"
+                                                                    className="bg-transparent border border-red-500/50 hover:bg-red-500/10 text-red-500 px-4 py-1.5 rounded text-sm font-bold transition-colors flex-1 min-w-[80px] disabled:opacity-50"
                                                                 >
                                                                     Reject
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setSelectedDelayAppointmentId(app._id);
+                                                                        setIsDelayModalOpen(true);
+                                                                    }}
+                                                                    className={`w-full sm:flex-1 sm:min-w-[100px] flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-bold transition-all ${['pending', 'accepted'].includes(app.delayRequestStatus) ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30' : 'bg-gray-800/50 text-gray-400 hover:text-white hover:bg-gray-800 border border-gray-700'}`}
+                                                                >
+                                                                    <Clock size={13} />
+                                                                    {['pending', 'accepted'].includes(app.delayRequestStatus) ? 'Delay Active' : 'Report Delay'}
                                                                 </button>
                                                             </div>
                                                         )}
 
                                                         {app.status === 'approved' && (
-                                                            <div className="flex gap-2 border-t border-gray-800 pt-3">
+                                                            <div className="flex flex-wrap gap-2 border-t border-gray-800 pt-3">
                                                                 <button
                                                                     onClick={() => openPrescriptionModal(app.patientId?._id)}
-                                                                    className="bg-purple-600 hover:bg-purple-500 text-white px-3 py-1.5 rounded text-sm font-bold transition-colors flex-1"
+                                                                    className="bg-purple-600 hover:bg-purple-500 text-white px-3 py-1.5 rounded text-sm font-bold transition-colors flex-1 min-w-[100px]"
                                                                 >
                                                                     Give Prescription
                                                                 </button>
                                                                 <button
                                                                     onClick={() => handleAppointmentStatus(app._id, 'completed')}
                                                                     disabled={statusLoadingId === app._id}
-                                                                    className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-sm font-bold transition-colors flex-1 disabled:opacity-50"
+                                                                    className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-sm font-bold transition-colors flex-1 min-w-[100px] disabled:opacity-50"
                                                                 >
                                                                     {statusLoadingId === app._id ? 'Processing...' : 'Complete Checkup'}
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setSelectedDelayAppointmentId(app._id);
+                                                                        setIsDelayModalOpen(true);
+                                                                    }}
+                                                                    className={`w-full sm:flex-1 sm:min-w-[100px] flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-bold transition-all ${['pending', 'accepted'].includes(app.delayRequestStatus) ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30' : 'bg-gray-800/50 text-gray-400 hover:text-white hover:bg-gray-800 border border-gray-700'}`}
+                                                                >
+                                                                    <Clock size={13} />
+                                                                    {['pending', 'accepted'].includes(app.delayRequestStatus) ? 'Delay Active' : 'Report Delay'}
                                                                 </button>
                                                             </div>
                                                         )}
@@ -935,14 +1540,16 @@ const DoctorDashboard = () => {
                                     <div className="lg:col-span-1 space-y-8">
                                         <div className="bg-[#111] border border-gray-800 rounded-2xl p-6">
                                             <h3 className="text-xl font-bold mb-4">Patient Workflow Directory</h3>
-                                            <div className="space-y-4">
+                                            <div className="space-y-3">
                                                 {patients.slice(0, 5).map((p) => (
-                                                    <div key={p._id} className="flex items-center justify-between p-3 bg-[#1a1a1a] rounded-xl border border-gray-800">
-                                                        <div>
-                                                            <p className="font-bold text-sm">{p.name}</p>
+                                                    <div key={p._id} className="group flex items-center justify-between p-3 bg-[#1a1a1a] rounded-xl border border-gray-800
+                                                        transition-all duration-250 ease-out
+                                                        hover:border-gray-700 hover:bg-[#1f1f1f] hover:shadow-[0_6px_20px_-12px_rgba(0,0,0,0.6)] cursor-default">
+                                                        <div className="transition-transform duration-300 group-hover:translate-x-0.5">
+                                                            <p className="font-bold text-sm transition-colors duration-200 group-hover:text-white">{p.name}</p>
                                                             <p className="text-gray-500 font-mono text-xs">{p._id.substring(0, 8)}...</p>
                                                         </div>
-                                                        <span className="bg-blue-500/10 text-blue-500 text-xs font-bold px-2 py-1 rounded">ACTIVE</span>
+                                                        <span className="bg-blue-500/10 text-blue-500 text-xs font-bold px-2.5 py-1 rounded-lg transition-all duration-300 group-hover:bg-blue-500/15 group-hover:scale-105">ACTIVE</span>
                                                     </div>
                                                 ))}
                                                 {patients.length === 0 && <p className="text-sm text-gray-500">No patients assigned to the system.</p>}
@@ -976,13 +1583,13 @@ const DoctorDashboard = () => {
                 )}
 
                 {activeTab === 'verification' && (
-                    <div className="flex-1 overflow-auto p-8 bg-[#0a0a0a]">
-                        <div className="flex justify-between items-center mb-6">
+                    <div className="p-4 sm:p-8 bg-[#0a0a0a] tab-section">
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
                             <div>
-                                <h2 className="text-3xl font-bold">Pending BC Verification</h2>
+                                <h2 className="text-2xl sm:text-3xl font-bold">Pending BC Verification</h2>
                                 <p className="text-gray-500 mt-1">These records were created during blockchain downtime and need manual sync.</p>
                             </div>
-                            <button 
+                            <button
                                 onClick={loadPendingRecordsData}
                                 className="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded-lg text-sm transition-colors border border-gray-700"
                             >
@@ -1044,8 +1651,8 @@ const DoctorDashboard = () => {
                 )}
 
                 {activeTab === 'admitted' && (
-                    <div className="flex-1 overflow-auto p-8 bg-[#0a0a0a]">
-                        <h2 className="text-3xl font-bold mb-6">Admitted Patients</h2>
+                    <div className="p-4 sm:p-8 bg-[#0a0a0a] tab-section">
+                        <h2 className="text-2xl sm:text-3xl font-bold mb-6">Admitted Patients</h2>
                         {loadingData ? (
                             <div className="flex items-center justify-center p-12">
                                 <Loader2 className="animate-spin text-green-500 w-10 h-10" />
@@ -1053,9 +1660,11 @@ const DoctorDashboard = () => {
                         ) : (
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                                 {admittedPatients.map((p) => (
-                                    <div key={p._id} className="bg-[#111] border border-gray-800 rounded-2xl p-6 hover:border-emerald-500/50 transition-colors group">
+                                    <div key={p._id} className="group relative bg-[#111] border border-gray-800 rounded-2xl p-6
+                                        transition-all duration-300 ease-out
+                                        hover:border-emerald-500/40 hover:shadow-[0_16px_44px_-20px_rgba(16,185,129,0.25),0_10px_30px_-18px_rgba(0,0,0,0.7)] hover:-translate-y-0.5">
                                         <div className="flex items-center gap-4 mb-4">
-                                            <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-500 group-hover:scale-110 transition-transform">
+                                            <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-500 transition-all duration-300 group-hover:scale-110 group-hover:shadow-lg group-hover:shadow-emerald-500/20 group-hover:border-emerald-500/40">
                                                 <Building2 size={24} />
                                             </div>
                                             <div>
@@ -1080,7 +1689,7 @@ const DoctorDashboard = () => {
                                         <div className="flex gap-2">
                                             <button
                                                 onClick={() => handleViewHistory(p._id, p.name)}
-                                                className="flex-1 bg-blue-500/10 hover:bg-blue-500/20 text-blue-500 text-xs font-bold py-2 rounded-lg transition-colors"
+                                                className="flex-1 bg-blue-500/10 hover:bg-blue-500/20 text-blue-500 text-xs font-bold py-2.5 rounded-xl transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] hover:shadow-[0_6px_20px_-8px_rgba(59,130,246,0.5)]"
                                             >
                                                 History
                                             </button>
@@ -1089,7 +1698,7 @@ const DoctorDashboard = () => {
                                                     setLabOrderForm({ ...labOrderForm, patientId: p._id });
                                                     setIsLabTestModalOpen(true);
                                                 }}
-                                                className="flex-1 bg-green-500/10 hover:bg-green-500/20 text-green-500 text-xs font-bold py-2 rounded-lg transition-colors"
+                                                className="flex-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-500 text-xs font-bold py-2.5 rounded-xl transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] hover:shadow-[0_6px_20px_-8px_rgba(16,185,129,0.5)]"
                                             >
                                                 Lab Test
                                             </button>
@@ -1098,7 +1707,7 @@ const DoctorDashboard = () => {
                                                     setPrescriptionForm({ ...initialPrescriptionForm, patientId: p._id, deliveryType: 'WARD', wardNumber: p.admission?.ward });
                                                     setIsPrescriptionModalOpen(true);
                                                 }}
-                                                className="flex-1 bg-purple-500/10 hover:bg-purple-500/20 text-purple-500 text-xs font-bold py-2 rounded-lg transition-colors"
+                                                className="flex-1 bg-purple-500/10 hover:bg-purple-500/20 text-purple-500 text-xs font-bold py-2.5 rounded-xl transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] hover:shadow-[0_6px_20px_-8px_rgba(168,85,247,0.5)]"
                                             >
                                                 Prescribe
                                             </button>
@@ -1107,7 +1716,7 @@ const DoctorDashboard = () => {
                                                     setCertificateForm({ patientId: p._id, status: p.admission?.certificate?.status || '' });
                                                     setIsCertificateModalOpen(true);
                                                 }}
-                                                className="flex-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 text-xs font-bold py-2 rounded-lg transition-colors"
+                                                className="flex-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 text-xs font-bold py-2.5 rounded-xl transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] hover:shadow-[0_6px_20px_-8px_rgba(245,158,11,0.5)]"
                                             >
                                                 Certificate
                                             </button>
@@ -1124,7 +1733,99 @@ const DoctorDashboard = () => {
                         )}
                     </div>
                 )}
+                    </div>
+                </div>
             </main>
+
+            <style>{`
+                .custom-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+                .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+                .custom-scrollbar::-webkit-scrollbar-thumb {
+                    background: linear-gradient(180deg, #2a2a2a 0%, #1f1f1f 100%);
+                    border-radius: 8px;
+                    border: 2px solid transparent;
+                    background-clip: padding-box;
+                    transition: background 0.2s;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+                    background: linear-gradient(180deg, #3a3a3a 0%, #2a2a2a 100%);
+                    background-clip: padding-box;
+                    border: 2px solid transparent;
+                }
+                .custom-scrollbar { scrollbar-width: thin; scrollbar-color: #2a2a2a transparent; }
+
+                .tab-section > h2, .tab-section > div > h2:first-child {
+                    letter-spacing: -0.01em;
+                }
+
+                .tab-section .rounded-2xl {
+                    transition: box-shadow 0.25s ease, border-color 0.25s ease, transform 0.25s ease;
+                }
+                .tab-section .rounded-2xl:hover {
+                    box-shadow: 0 10px 40px -18px rgba(0,0,0,0.7);
+                }
+
+                @media (max-width: 640px) {
+                    .tab-section > div.grid.grid-cols-2 { gap: 0.7rem !important; }
+                    .tab-section .space-y-3 > * + * { margin-top: 0.75rem !important; }
+                }
+
+                .animate-in { animation: tabFadeIn 0.35s ease-out both; }
+                @keyframes tabFadeIn {
+                    from { opacity: 0; transform: translateY(6px); }
+                    to   { opacity: 1; transform: translateY(0); }
+                }
+                .tab-section { animation: tabFadeIn 0.3s ease-out both; }
+            `}</style>
+
+            {/* ── MOBILE BOTTOM NAVIGATION (lg:hidden) — exactly 5 items, NO Search ── */}
+            <nav className="fixed bottom-3 left-3 right-3 z-40 lg:hidden">
+                <div className="bg-[#0d0d0d]/95 backdrop-blur-2xl border border-gray-800/80 rounded-[28px] shadow-2xl shadow-black/60 safe-bottom">
+                    <div className="flex items-center justify-around px-1.5 py-2.5 max-w-lg mx-auto">
+                        {[
+                            { tab: 'overview',          icon: Home,      label: 'Home' },
+                            { tab: 'appointments',      icon: Calendar,  label: 'Appointments' },
+                            { tab: 'admitted',          icon: Users,     label: 'Admitted Patients' },
+                            { tab: 'availability',      icon: Clock,     label: 'Availability' },
+                            { tab: 'settings',          icon: User,      label: 'Profile' },
+                        ].map(({ tab, icon: Icon, label }) => {
+                            const isActive = activeTab === tab;
+                            const pendingCount = tab === 'appointments'
+                                ? appointments.filter(a => a.status === 'pending').length
+                                : 0;
+                            const emergencyCount = tab === 'overview'
+                                ? appointments.filter(a => a.isEmergency && a.status !== 'completed').length
+                                : 0;
+                            const admittedCount = tab === 'admitted' ? admittedPatients.length : 0;
+                            const badge = pendingCount || emergencyCount || admittedCount || 0;
+                            return (
+                                <button
+                                    key={tab}
+                                    onClick={() => setActiveTab(tab)}
+                                    className={`relative flex flex-col items-center justify-center gap-1 px-1 py-1.5 rounded-2xl transition-all duration-200 flex-1 min-w-[52px] ${isActive ? 'text-emerald-400' : 'text-gray-500'}`}
+                                >
+                                    {isActive && (
+                                        <span className="absolute inset-x-1 top-0.5 bottom-0.5 bg-gradient-to-b from-emerald-500/12 to-transparent rounded-2xl shadow-[0_0_20px_rgba(16,185,129,0.08)] border-t border-emerald-500/20" />
+                                    )}
+                                    <Icon
+                                        size={22}
+                                        strokeWidth={isActive ? 2.5 : 2}
+                                        className={`relative z-10 transition-transform duration-200 ${isActive ? 'scale-110 -translate-y-0.5' : 'scale-100'}`}
+                                    />
+                                    <span className={`relative z-10 text-[10px] font-bold tracking-tight leading-none mt-0.5 ${isActive ? 'text-emerald-400' : 'text-gray-500'}`}>
+                                        {label}
+                                    </span>
+                                    {badge > 0 && (
+                                        <span className="absolute -top-0.5 right-1 bg-red-500 text-white text-[8px] font-black px-1.5 py-0.5 rounded-full min-w-[14px] text-center z-20 shadow-lg ring-1 ring-black/50">
+                                            {badge > 9 ? '9+' : badge}
+                                        </span>
+                                    )}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            </nav>
 
             {/* --- CREATE MEDICAL RECORD MODAL --- */}
             {isRecordModalOpen && (
@@ -1271,10 +1972,10 @@ const DoctorDashboard = () => {
 
                             <div>
                                 <label className="block text-sm font-medium text-gray-400 mb-1">Notes / Instructions</label>
-                                <textarea 
-                                    value={prescriptionForm.notes} 
-                                    onChange={e => setPrescriptionForm({ ...prescriptionForm, notes: e.target.value })} 
-                                    className="w-full min-h-[80px] bg-[#0a0a0a] border border-gray-800 rounded-lg p-3 text-white focus:outline-none focus:border-purple-500" 
+                                <textarea
+                                    value={prescriptionForm.notes}
+                                    onChange={e => setPrescriptionForm({ ...prescriptionForm, notes: e.target.value })}
+                                    className="w-full min-h-[80px] bg-[#0a0a0a] border border-gray-800 rounded-lg p-3 text-white focus:outline-none focus:border-purple-500"
                                     placeholder="Stay hydrated, take with food..."
                                 ></textarea>
                             </div>
@@ -1285,11 +1986,10 @@ const DoctorDashboard = () => {
                                     <button
                                         type="button"
                                         onClick={() => setPrescriptionForm(prev => ({ ...prev, deliveryType: 'PHARMACY' }))}
-                                        className={`flex items-center justify-center gap-2 py-3 rounded-xl border transition-all ${
-                                            prescriptionForm.deliveryType === 'PHARMACY' 
-                                            ? 'bg-purple-500/10 border-purple-500 text-purple-400 font-bold' 
+                                        className={`flex items-center justify-center gap-2 py-3 rounded-xl border transition-all ${prescriptionForm.deliveryType === 'PHARMACY'
+                                            ? 'bg-purple-500/10 border-purple-500 text-purple-400 font-bold'
                                             : 'bg-transparent border-gray-800 text-gray-500'
-                                        }`}
+                                            }`}
                                     >
                                         <Activity size={18} /> Pharmacy Pickup
                                     </button>
@@ -1298,22 +1998,21 @@ const DoctorDashboard = () => {
                                         onClick={() => {
                                             const patientObj = admittedPatients.find(p => p._id === prescriptionForm.patientId) || patients.find(p => p._id === prescriptionForm.patientId);
                                             const isAdmitted = patientObj?.admission?.isAdmitted;
-                                            
+
                                             if (!isAdmitted) {
                                                 showToast("Warning: Patient is not admitted. Direct Ward delivery is not suggested.");
                                             }
-                                            
-                                            setPrescriptionForm(prev => ({ 
-                                                ...prev, 
+
+                                            setPrescriptionForm(prev => ({
+                                                ...prev,
                                                 deliveryType: 'WARD',
                                                 wardNumber: patientObj?.admission?.ward || prev.wardNumber
                                             }));
                                         }}
-                                        className={`flex items-center justify-center gap-2 py-3 rounded-xl border transition-all ${
-                                            prescriptionForm.deliveryType === 'WARD' 
-                                            ? 'bg-blue-500/10 border-blue-500 text-blue-400 font-bold' 
+                                        className={`flex items-center justify-center gap-2 py-3 rounded-xl border transition-all ${prescriptionForm.deliveryType === 'WARD'
+                                            ? 'bg-blue-500/10 border-blue-500 text-blue-400 font-bold'
                                             : 'bg-transparent border-gray-800 text-gray-500'
-                                        }`}
+                                            }`}
                                     >
                                         <LayoutGrid size={18} /> Ward Delivery
                                     </button>
@@ -1323,7 +2022,7 @@ const DoctorDashboard = () => {
                                     <div className="animate-in slide-in-from-top-2 duration-300 space-y-4">
                                         {(admittedPatients.find(p => p._id === prescriptionForm.patientId) || patients.find(p => p._id === prescriptionForm.patientId))?.admission?.isAdmitted ? (
                                             <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-xl flex items-center gap-2 text-emerald-500 text-xs font-bold">
-                                                <CheckCircle size={14} /> Patient is admitted to { (admittedPatients.find(p => p._id === prescriptionForm.patientId) || patients.find(p => p._id === prescriptionForm.patientId))?.admission?.ward || 'General Ward' }
+                                                <CheckCircle size={14} /> Patient is admitted to {(admittedPatients.find(p => p._id === prescriptionForm.patientId) || patients.find(p => p._id === prescriptionForm.patientId))?.admission?.ward || 'General Ward'}
                                             </div>
                                         ) : (
                                             <div className="bg-red-500/10 border border-red-500/20 p-3 rounded-xl flex items-center gap-2 text-red-500 text-xs font-bold">
@@ -1361,22 +2060,20 @@ const DoctorDashboard = () => {
                                                 <button
                                                     type="button"
                                                     onClick={() => setPrescriptionForm(prev => ({ ...prev, isEmergency: false }))}
-                                                    className={`flex-1 py-3 rounded-xl border text-sm font-bold transition-all ${
-                                                        !prescriptionForm.isEmergency 
-                                                        ? 'bg-green-500/10 border-green-500/50 text-green-500' 
+                                                    className={`flex-1 py-3 rounded-xl border text-sm font-bold transition-all ${!prescriptionForm.isEmergency
+                                                        ? 'bg-green-500/10 border-green-500/50 text-green-500'
                                                         : 'bg-[#111] border-gray-800 text-gray-500'
-                                                    }`}
+                                                        }`}
                                                 >
                                                     Normal
                                                 </button>
                                                 <button
                                                     type="button"
                                                     onClick={() => setPrescriptionForm(prev => ({ ...prev, isEmergency: true }))}
-                                                    className={`flex-1 py-3 rounded-xl border text-sm font-bold transition-all ${
-                                                        prescriptionForm.isEmergency 
-                                                        ? 'bg-red-500/10 border-red-500/50 text-red-500 shadow-lg shadow-red-900/20' 
+                                                    className={`flex-1 py-3 rounded-xl border text-sm font-bold transition-all ${prescriptionForm.isEmergency
+                                                        ? 'bg-red-500/10 border-red-500/50 text-red-500 shadow-lg shadow-red-900/20'
                                                         : 'bg-[#111] border-gray-800 text-gray-500'
-                                                    }`}
+                                                        }`}
                                                 >
                                                     Emergency
                                                 </button>
@@ -1427,7 +2124,7 @@ const DoctorDashboard = () => {
                                         patientHistory.map((record) => (
                                             <div key={record._id} className="group relative bg-[#0f1115] border border-white/[0.08] rounded-[32px] overflow-hidden hover:border-blue-500/40 transition-all duration-500 hover:shadow-2xl hover:shadow-blue-500/10">
                                                 <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/5 blur-[100px] -translate-y-1/2 translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none" />
-                                                
+
                                                 <div className="p-8 relative z-10">
                                                     <div className="flex flex-col md:flex-row justify-between items-start gap-6 mb-8">
                                                         <div className="flex-1">
@@ -1445,7 +2142,7 @@ const DoctorDashboard = () => {
                                                                 )}
                                                             </div>
                                                         </div>
-                                                        
+
                                                         <div className="flex flex-col items-end text-right gap-2.5">
                                                             <div className="bg-blue-500/5 border border-blue-500/10 p-4 rounded-[20px] backdrop-blur-md shadow-2xl min-w-[180px]">
                                                                 <p className="text-[10px] font-black text-blue-500/60 uppercase tracking-[0.2em] mb-1">Attending Physician</p>
@@ -1471,10 +2168,10 @@ const DoctorDashboard = () => {
                                                                 {record.treatmentPlan || record.description || 'Routine observation and monitoring as per standard protocol.'}
                                                             </p>
                                                         </div>
-                                                        
+
                                                         <div className="bg-white/[0.02] border border-white/[0.04] p-6 rounded-[24px] hover:bg-white/[0.04] transition-all duration-300 relative group/box">
                                                             <div className="absolute top-4 right-4 text-purple-500/20 group-hover/box:text-purple-500/40 transition-colors">
-                                                                    <FileText size={24} />
+                                                                <FileText size={24} />
                                                             </div>
                                                             <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-[0.2em] mb-4 flex items-center gap-2">Practitioner Notes</h4>
                                                             <p className="text-gray-400 leading-relaxed font-medium italic">
@@ -1492,8 +2189,8 @@ const DoctorDashboard = () => {
                                                                 {record.blockchainTxHash || "Verification pending on-chain..."}
                                                             </div>
                                                         </div>
-                                                        
-                                                        <button 
+
+                                                        <button
                                                             onClick={() => {
                                                                 if (record.fileUrl) {
                                                                     const url = `${getBaseUrl()}/${record.fileUrl.replace(/\\/g, '/').replace(/^\/?(backend\/)?/, '')}`;
@@ -1552,9 +2249,9 @@ const DoctorDashboard = () => {
                             <div className="space-y-4">
                                 <div className="flex justify-between items-end mb-2">
                                     <label className="block text-sm font-bold text-gray-400 uppercase tracking-wider">Required Lab Tests</label>
-                                    <button 
-                                        type="button" 
-                                        onClick={addLabRow} 
+                                    <button
+                                        type="button"
+                                        onClick={addLabRow}
                                         className="text-xs bg-blue-500/10 text-blue-400 hover:text-blue-300 hover:bg-blue-500/20 px-3 py-1.5 rounded flex items-center gap-1 transition-colors"
                                     >
                                         <Plus size={14} /> Add Row
@@ -1584,9 +2281,9 @@ const DoctorDashboard = () => {
                                                 )}
                                             </div>
                                             {labOrderForm.tests.length > 1 && (
-                                                <button 
-                                                    type="button" 
-                                                    onClick={() => removeLabRow(index)} 
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeLabRow(index)}
                                                     className="p-2 text-red-500/50 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors"
                                                 >
                                                     <Trash2 size={16} />
@@ -1628,11 +2325,11 @@ const DoctorDashboard = () => {
                                 </h2>
                                 <p className="text-xs text-gray-500 mt-1 uppercase tracking-wider font-bold">Status Broadcast to Booked Patients</p>
                             </div>
-                            <button onClick={() => setIsDelayModalOpen(false)} className="text-gray-400 hover:text-white transition-colors">
+                            <button onClick={closeDelayModal} className="text-gray-400 hover:text-white transition-colors">
                                 <X size={24} />
                             </button>
                         </div>
-                        
+
                         <form onSubmit={handleDelaySubmit} className="p-6 space-y-5">
                             <div className="flex items-center justify-between p-4 bg-white/5 rounded-2xl border border-white/5">
                                 <span className="text-sm font-bold text-gray-300">Are you running late?</span>
@@ -1647,6 +2344,29 @@ const DoctorDashboard = () => {
 
                             {delayForm.isDelayed && (
                                 <>
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold text-gray-500 uppercase tracking-widest px-1">Select Appointment</label>
+                                        <select
+                                            required
+                                            value={selectedDelayAppointmentId || ''}
+                                            onChange={(e) => setSelectedDelayAppointmentId(e.target.value)}
+                                            className="w-full bg-[#181a1b] border border-gray-800 rounded-2xl px-4 py-3 text-sm text-white focus:outline-none focus:border-amber-500/50 transition-colors"
+                                        >
+                                            <option value="" disabled>Choose an appointment to report delay for...</option>
+                                            {appointments
+                                                .filter(a => ['pending', 'approved'].includes(a.status))
+                                                .map(a => (
+                                                    <option key={a._id} value={a._id} className="bg-[#181a1b] text-white">
+                                                        {a.patientId?.name || 'Patient'} — {a.date} at {a.time} ({a.status})
+                                                    </option>
+                                                ))
+                                            }
+                                        </select>
+                                        {appointments.filter(a => ['pending', 'approved'].includes(a.status)).length === 0 && (
+                                            <p className="text-[11px] text-amber-400/80 px-1">No pending or approved appointments found.</p>
+                                        )}
+                                    </div>
+
                                     <div className="space-y-2">
                                         <label className="text-xs font-bold text-gray-500 uppercase tracking-widest px-1">Reason for Delay</label>
                                         <div className="flex flex-wrap gap-2 mb-3">
@@ -1699,35 +2419,35 @@ const DoctorDashboard = () => {
             {previewFile && (
                 <div className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-6">
                     <div className="absolute top-6 right-6 flex items-center gap-4">
-                         <a 
-                            href={previewFile.url} 
-                            download 
+                        <a
+                            href={previewFile.url}
+                            download
                             className="bg-gray-800 hover:bg-gray-700 text-white p-2.5 rounded-full transition-colors border border-gray-700 shadow-xl"
                             title="Download Report"
                         >
                             <LayoutGrid size={24} />
                         </a>
-                        <button 
-                            onClick={() => setPreviewFile(null)} 
+                        <button
+                            onClick={() => setPreviewFile(null)}
                             className="text-gray-400 hover:text-white bg-gray-900 border border-gray-800 rounded-full p-2.5 transition-all hover:scale-110 shadow-xl"
                         >
                             <X size={28} />
                         </button>
                     </div>
-                    
+
                     <div className="w-full max-w-5xl h-full flex items-center justify-center pointer-events-none">
                         <div className="pointer-events-auto w-full h-full flex items-center justify-center">
                             {previewFile.type === 'pdf' ? (
-                                <iframe 
-                                    src={previewFile.url} 
+                                <iframe
+                                    src={previewFile.url}
                                     className="w-full h-full rounded-2xl border border-gray-800 bg-white shadow-2xl"
                                     title="Full Report PDF"
                                 />
                             ) : (
                                 <div className="relative group max-h-full max-w-full overflow-auto rounded-2xl scrollbar-hide">
-                                    <img 
-                                        src={previewFile.url} 
-                                        alt="Clinical Report Full" 
+                                    <img
+                                        src={previewFile.url}
+                                        alt="Clinical Report Full"
                                         className="rounded-2xl shadow-2xl border border-gray-800 max-h-[85vh] object-contain mx-auto"
                                     />
                                     <div className="absolute inset-0 bg-transparent group-hover:bg-white/5 transition-colors pointer-events-none"></div>
@@ -1735,7 +2455,7 @@ const DoctorDashboard = () => {
                             )}
                         </div>
                     </div>
-                    
+
                     <div className="mt-6 text-gray-400 text-xs font-medium uppercase tracking-[0.2em] bg-black/40 px-4 py-2 rounded-full border border-gray-800/50">
                         Secure Electronic Health Record Preview
                     </div>
@@ -1762,8 +2482,8 @@ const DoctorDashboard = () => {
                                     <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">Authorizing Physician</p>
                                     <p className="text-sm font-bold text-amber-500">Dr. {user?.name}</p>
                                 </div>
-                                <button 
-                                    onClick={() => setIsCertificateModalOpen(false)} 
+                                <button
+                                    onClick={() => setIsCertificateModalOpen(false)}
                                     className="text-gray-500 hover:text-white bg-white/5 hover:bg-white/10 rounded-full p-2 transition-all"
                                 >
                                     <X size={20} />
@@ -1783,11 +2503,10 @@ const DoctorDashboard = () => {
                                                     key={status}
                                                     type="button"
                                                     onClick={() => setCertificateForm({ ...certificateForm, status })}
-                                                    className={`py-3 rounded-2xl border text-[11px] font-black uppercase tracking-wider transition-all duration-300 ${
-                                                        certificateForm.status === status 
-                                                        ? 'bg-amber-500 text-black border-amber-500 shadow-lg shadow-amber-500/20 scale-[1.02]' 
+                                                    className={`py-3 rounded-2xl border text-[11px] font-black uppercase tracking-wider transition-all duration-300 ${certificateForm.status === status
+                                                        ? 'bg-amber-500 text-black border-amber-500 shadow-lg shadow-amber-500/20 scale-[1.02]'
                                                         : 'bg-white/[0.03] border-white/5 text-gray-500 hover:border-white/20 hover:text-gray-300'
-                                                    }`}
+                                                        }`}
                                                 >
                                                     {status}
                                                 </button>
@@ -1879,9 +2598,9 @@ const DoctorDashboard = () => {
             )}
 
             {/* --- QR SCANNER MODAL --- */}
-            <QRScannerModal 
-                isOpen={isQRScannerOpen} 
-                onClose={() => setIsQRScannerOpen(false)} 
+            <QRScannerModal
+                isOpen={isQRScannerOpen}
+                onClose={() => setIsQRScannerOpen(false)}
             />
         </div>
     );
@@ -1902,13 +2621,23 @@ const NavItem = ({ icon: Icon, label, active, badge, onClick }) => (
     </button>
 );
 
-const StatCard = ({ icon: Icon, title, value, color, bg }) => (
-    <div className="bg-[#111] border border-gray-800 rounded-2xl p-6">
-        <div className="flex justify-between items-start mb-4">
-            <div className={`p-3 rounded-xl ${bg}`}><Icon className={`w-6 h-6 ${color}`} /></div>
+const StatCard = ({ icon: Icon, title, value, color, bg, compact }) => (
+    <div
+        className={`group relative overflow-hidden bg-[#111] border border-gray-800 rounded-2xl ${compact ? 'p-4 sm:p-6' : 'p-6'}
+            transition-all duration-300 ease-out
+            hover:border-gray-700 hover:shadow-[0_14px_40px_-18px_rgba(0,0,0,0.8)] hover:-translate-y-0.5
+            active:translate-y-0 active:scale-[0.99]`}
+    >
+        <div className={`absolute -top-12 -right-12 w-28 h-28 rounded-full ${bg} opacity-0 blur-2xl transition-opacity duration-500 group-hover:opacity-40`} />
+        <div className={`relative flex justify-between items-start ${compact ? 'mb-2 sm:mb-4' : 'mb-4'}`}>
+            <div className={`${bg} ${compact ? 'p-2 sm:p-3 rounded-xl' : 'p-3 rounded-xl'}
+                transition-all duration-300 ease-out
+                group-hover:scale-110 group-hover:shadow-lg`}>
+                <Icon className={`${color} ${compact ? 'w-5 h-5 sm:w-6 sm:h-6' : 'w-6 h-6'} transition-transform duration-300 group-hover:rotate-[-4deg]`} />
+            </div>
         </div>
-        <p className="text-gray-400 text-sm font-medium mb-1">{title}</p>
-        <h3 className="text-3xl font-bold truncate">{value}</h3>
+        <p className={`relative text-gray-400 ${compact ? 'text-xs sm:text-sm mb-0.5 sm:mb-1' : 'text-sm font-medium mb-1'} font-medium transition-colors duration-300 group-hover:text-gray-300`}>{title}</p>
+        <h3 className={`relative font-bold truncate ${compact ? 'text-2xl sm:text-3xl' : 'text-3xl'} tracking-tight transition-all duration-300 group-hover:scale-[1.02] origin-left`}>{value}</h3>
     </div>
 );
 

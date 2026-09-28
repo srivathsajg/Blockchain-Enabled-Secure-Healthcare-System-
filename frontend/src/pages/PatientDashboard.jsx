@@ -17,6 +17,8 @@ import UniversalSearchBar from '../components/ui/UniversalSearchBar';
 import AIAssistant from '../components/ui/AIAssistant';
 import Loader from '../components/ui/Loader';
 import CustomSelect from '../components/ui/CustomSelect';
+import NotificationBell from '../components/ui/NotificationBell';
+import { useSocketNotifications } from '../hooks/useSocketNotifications';
 
 import PatientProfileQRCode from '../components/qr/PatientProfileQRCode';
 
@@ -98,7 +100,7 @@ const PatientDashboard = () => {
 
     const [toast, setToast] = useState('');
     const [mobileOpen, setMobileOpen] = useState(false);
-    const [notificationCount, setNotificationCount] = useState(0);
+    const [notificationCount, markAllNotificationsRead, , notifications, markNotificationRead] = useSocketNotifications({ userId: user?.id, hospitalName: user?.hospitalName, notificationPrefs: user?.notificationPreferences });
     const [isTrackingOpen, setIsTrackingOpen] = useState(false);
     const [deliveryLocation, setDeliveryLocation] = useState(null);
     const [trackedDeliveryId, setTrackedDeliveryId] = useState(null);
@@ -210,7 +212,6 @@ const PatientDashboard = () => {
         });
 
         socket.on('appointment-approved', (data) => {
-            setNotificationCount((prev) => prev + 1);
             showToast(data?.message || 'Appointment approved');
         });
 
@@ -378,14 +379,7 @@ const PatientDashboard = () => {
                             <Truck size={14} className="group-hover:translate-x-0.5 transition-transform" />
                             <span className="hidden sm:block text-xs font-black uppercase tracking-widest">Track Order</span>
                         </button>
-                        <button className="p-2 rounded-xl text-gray-500 hover:text-white hover:bg-white/[0.05] transition-colors relative">
-                            <Bell size={18} />
-                            {notificationCount > 0 && (
-                                <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center">
-                                    {notificationCount}
-                                </span>
-                            )}
-                        </button>
+                        <NotificationBell count={notificationCount} notifications={notifications} onClick={markAllNotificationsRead} onMarkRead={markNotificationRead} />
                         <div className="flex items-center gap-2 sm:gap-2.5">
                             <div className="text-right hidden sm:block">
                                 <p className="text-xs font-bold text-white truncate max-w-[80px]">{user?.name || 'Patient'}</p>

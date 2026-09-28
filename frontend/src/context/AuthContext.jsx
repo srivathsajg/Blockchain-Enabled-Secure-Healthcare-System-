@@ -13,16 +13,37 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     const initAuth = async () => {
       const storedToken = localStorage.getItem('token');
-      const storedUser = localStorage.getItem('user');
 
-      if (storedToken && storedUser) {
+      if (storedToken) {
         setToken(storedToken);
         try {
-            const parsedUser = JSON.parse(storedUser);
-            setUser(parsedUser);
+          // Always fetch fresh profile from server — localStorage may be stale
+          const res = await api.get('/auth/profile', {
+            headers: { Authorization: `Bearer ${storedToken}` }
+          });
+          if (res.data?.success && res.data?.data) {
+            const freshUser = res.data.data;
+            setUser(freshUser);
+            localStorage.setItem('user', JSON.stringify(freshUser));
+          } else {
+            // Fallback to localStorage if server request fails
+            const storedUser = localStorage.getItem('user');
+            if (storedUser) {
+              setUser(JSON.parse(storedUser));
+            }
+          }
         } catch (e) {
-            console.error("Failed to parse user from local storage", e);
+          // Token may be expired or server down — fall back to localStorage
+          const storedUser = localStorage.getItem('user');
+          if (storedUser) {
+            try {
+              setUser(JSON.parse(storedUser));
+            } catch {
+              logout();
+            }
+          } else {
             logout();
+          }
         }
       }
       setLoading(false);

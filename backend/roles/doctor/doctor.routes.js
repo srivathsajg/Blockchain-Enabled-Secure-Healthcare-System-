@@ -17,7 +17,10 @@ const {
     updateDelayStatus,
     getAdmittedPatients,
     getPatientHistory,
-    issueAdmissionCertificate
+    issueAdmissionCertificate,
+    startDoctorEmergency,
+    completeDoctorEmergency,
+    getEmergencyCaseMedicalHistory
 } = require("./doctor.controller");
 
 // Apply basic auth middleware first to verify JWT and extract user
@@ -50,5 +53,9 @@ router.patch("/verify-record/:id", verifyRecordOnBlockchain);
 router.patch("/update-delay", updateDelayStatus);
 router.get("/admitted-patients", getAdmittedPatients);
 router.patch("/issue-certificate/:patientId", issueAdmissionCertificate);
+
+router.post("/start-emergency/:caseId", startDoctorEmergency);
+router.post("/complete-emergency/:caseId", completeDoctorEmergency);
+router.get("/emergency-cases/:caseId/medical-history", getEmergencyCaseMedicalHistory);
 
 module.exports = router;

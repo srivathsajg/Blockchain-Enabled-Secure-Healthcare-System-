@@ -32,25 +32,39 @@ const VALID_TRANSITIONS = {
   CANCELLED: [],
 };
 
+const VALID_TRANSITIONS_DOCTOR = {
+  REPORTED: ["UNDER_TREATMENT", "CANCELLED"],
+  UNDER_TREATMENT: ["CLOSED"],
+  CLOSED: [],
+  CANCELLED: [],
+};
+
+const RESPONSE_TYPES = EmergencyCase.RESPONSE_TYPES || [
+  "AMBULANCE_EMERGENCY",
+  "DOCTOR_EMERGENCY",
+];
+
 const isTerminalStatus = (status) => status === "CLOSED" || status === "CANCELLED";
 
-const isValidStatusTransition = (fromStatus, toStatus) => {
+const isValidStatusTransition = (fromStatus, toStatus, responseType = "AMBULANCE_EMERGENCY") => {
   if (fromStatus === toStatus) return true;
-  const allowed = VALID_TRANSITIONS[fromStatus];
+  const transitions = responseType === "DOCTOR_EMERGENCY" ? VALID_TRANSITIONS_DOCTOR : VALID_TRANSITIONS;
+  const allowed = transitions[fromStatus];
   return !!allowed && allowed.includes(toStatus);
 };
 
-const assertValidStatusTransition = (fromStatus, toStatus) => {
+const assertValidStatusTransition = (fromStatus, toStatus, responseType = "AMBULANCE_EMERGENCY") => {
   if (isTerminalStatus(fromStatus) && fromStatus !== toStatus) {
     const err = new Error(`Illegal transition: ${fromStatus} is terminal and cannot be changed`);
     err.statusCode = 400;
     throw err;
   }
-  if (!isValidStatusTransition(fromStatus, toStatus)) {
-    const allowed = VALID_TRANSITIONS[fromStatus] || [];
+  if (!isValidStatusTransition(fromStatus, toStatus, responseType)) {
+    const transitions = responseType === "DOCTOR_EMERGENCY" ? VALID_TRANSITIONS_DOCTOR : VALID_TRANSITIONS;
+    const allowed = transitions[fromStatus] || [];
     const allowedStr = allowed.length > 0 ? allowed.join(", ") : "(none)";
     const err = new Error(
-      `Illegal status transition ${fromStatus} → ${toStatus}. Allowed from ${fromStatus}: ${allowedStr}`
+      `Illegal status transition ${fromStatus} → ${toStatus} (${responseType}). Allowed from ${fromStatus}: ${allowedStr}`
     );
     err.statusCode = 400;
     throw err;
@@ -101,17 +115,34 @@ const buildAccessQuery = (user) => {
   }
 };
 
+const getEntityId = (entity) => {
+  if (!entity) return null;
+  if (entity._id) return String(entity._id);
+  return String(entity);
+};
+
 const canViewCase = (user, emergencyCase) => {
   if (user.role === "admin") return true;
 
-  const userId = String(user.id);
-  if (String(emergencyCase.reportedBy) === userId) return true;
-  if (emergencyCase.patient && String(emergencyCase.patient) === userId) return true;
-  if (emergencyCase.assignedDoctor && String(emergencyCase.assignedDoctor) === userId) return true;
-  if (emergencyCase.assignedAmbulance && String(emergencyCase.assignedAmbulance) === userId) return true;
-  if (emergencyCase.assignedPoliceOfficer && String(emergencyCase.assignedPoliceOfficer) === userId) return true;
+  const userId = String(user.id || user._id);
+  const reportedById = getEntityId(emergencyCase.reportedBy);
+  const patientId = getEntityId(emergencyCase.patient);
+  const assignedDoctorId = getEntityId(emergencyCase.assignedDoctor);
+  const assignedAmbulanceId = getEntityId(emergencyCase.assignedAmbulance);
+  const assignedPoliceOfficerId = getEntityId(emergencyCase.assignedPoliceOfficer);
 
-  if (user.role === "doctor" && emergencyCase.assignedHospital && user.hospitalName) {
+  if (reportedById === userId) return true;
+  if (patientId === userId) return true;
+  if (assignedDoctorId === userId) return true;
+  if (assignedAmbulanceId === userId) return true;
+  if (assignedPoliceOfficerId === userId) return true;
+
+  if (
+    user.role === "doctor" &&
+    emergencyCase.responseType !== "DOCTOR_EMERGENCY" &&
+    emergencyCase.assignedHospital &&
+    user.hospitalName
+  ) {
     if (emergencyCase.assignedHospital.toLowerCase() === user.hospitalName.toLowerCase()) {
       return true;
     }
@@ -123,15 +154,25 @@ const canViewCase = (user, emergencyCase) => {
 const canUpdateDetails = (user, emergencyCase) => {
   if (user.role === "admin") return true;
 
-  const userId = String(user.id);
-  if (emergencyCase.status === "REPORTED" && String(emergencyCase.reportedBy) === userId) {
+  const userId = String(user.id || user._id);
+  const reportedById = getEntityId(emergencyCase.reportedBy);
+  const assignedDoctorId = getEntityId(emergencyCase.assignedDoctor);
+  const assignedAmbulanceId = getEntityId(emergencyCase.assignedAmbulance);
+  const assignedPoliceOfficerId = getEntityId(emergencyCase.assignedPoliceOfficer);
+
+  if (emergencyCase.status === "REPORTED" && reportedById === userId) {
     return true;
   }
-  if (emergencyCase.assignedDoctor && String(emergencyCase.assignedDoctor) === userId) return true;
-  if (emergencyCase.assignedAmbulance && String(emergencyCase.assignedAmbulance) === userId) return true;
-  if (emergencyCase.assignedPoliceOfficer && String(emergencyCase.assignedPoliceOfficer) === userId) return true;
+  if (assignedDoctorId && assignedDoctorId === userId) return true;
+  if (assignedAmbulanceId && assignedAmbulanceId === userId) return true;
+  if (assignedPoliceOfficerId && assignedPoliceOfficerId === userId) return true;
 
-  if (user.role === "doctor" && emergencyCase.assignedHospital && user.hospitalName) {
+  if (
+    user.role === "doctor" &&
+    emergencyCase.responseType !== "DOCTOR_EMERGENCY" &&
+    emergencyCase.assignedHospital &&
+    user.hospitalName
+  ) {
     if (emergencyCase.assignedHospital.toLowerCase() === user.hospitalName.toLowerCase()) {
       return true;
     }
@@ -143,19 +184,27 @@ const canUpdateDetails = (user, emergencyCase) => {
 const canUpdateStatus = (user, emergencyCase, newStatus) => {
   if (user.role === "admin") return true;
 
-  const userId = String(user.id);
+  const userId = String(user.id || user._id);
+  const reportedById = getEntityId(emergencyCase.reportedBy);
+  const assignedDoctorId = getEntityId(emergencyCase.assignedDoctor);
+  const assignedAmbulanceId = getEntityId(emergencyCase.assignedAmbulance);
 
   if (newStatus === "CANCELLED") {
-    if (String(emergencyCase.reportedBy) === userId && emergencyCase.status === "REPORTED") {
+    if (reportedById === userId && emergencyCase.status === "REPORTED") {
       return true;
     }
     return false;
   }
 
-  if (emergencyCase.assignedDoctor && String(emergencyCase.assignedDoctor) === userId) return true;
-  if (emergencyCase.assignedAmbulance && String(emergencyCase.assignedAmbulance) === userId) return true;
+  if (assignedDoctorId && assignedDoctorId === userId) return true;
+  if (assignedAmbulanceId && assignedAmbulanceId === userId) return true;
 
-  if (user.role === "doctor" && emergencyCase.assignedHospital && user.hospitalName) {
+  if (
+    user.role === "doctor" &&
+    emergencyCase.responseType !== "DOCTOR_EMERGENCY" &&
+    emergencyCase.assignedHospital &&
+    user.hospitalName
+  ) {
     if (emergencyCase.assignedHospital.toLowerCase() === user.hospitalName.toLowerCase()) {
       return true;
     }
@@ -166,10 +215,11 @@ const canUpdateStatus = (user, emergencyCase, newStatus) => {
 
 const canCancelCase = (user, emergencyCase) => {
   if (user.role === "admin") return true;
-  const userId = String(user.id);
+  const userId = String(user.id || user._id);
+  const reportedById = getEntityId(emergencyCase.reportedBy);
   return (
     emergencyCase.status === "REPORTED" &&
-    String(emergencyCase.reportedBy) === userId
+    reportedById === userId
   );
 };
 
@@ -249,18 +299,55 @@ const createEmergencyCase = async ({ user, data, ipAddress }) => {
     assignedDoctor,
     linkedAppointmentId,
     notes,
+    responseType,
+    victimPhoto,
+    reporterMode,
   } = data;
 
   validateIncidentType(incidentType);
   validateSeverity(severity);
 
-  if (patient) {
+  const normalizedResponseType = RESPONSE_TYPES.includes(responseType)
+    ? responseType
+    : "AMBULANCE_EMERGENCY";
+
+  // Duplicate submission protection: if same user submitted an identical active case within 15 seconds
+  if (normalizedResponseType === "AMBULANCE_EMERGENCY" && user?.id) {
+    const recentDuplicate = await EmergencyCase.findOne({
+      reportedBy: new mongoose.Types.ObjectId(user.id),
+      responseType: "AMBULANCE_EMERGENCY",
+      status: { $in: ["REPORTED", "AMBULANCE_REQUESTED"] },
+      createdAt: { $gte: new Date(Date.now() - 15000) },
+      incidentType,
+    })
+      .populate("patient", "name email phone bloodGroup healthSummary")
+      .populate("reportedBy", "name role email")
+      .populate("assignedDoctor", "name specialization hospitalName")
+      .populate("assignedAmbulance", "name phone")
+      .populate("assignedPoliceOfficer", "name phone")
+      .lean();
+
+    if (recentDuplicate) {
+      return recentDuplicate;
+    }
+  }
+
+  // Determine patient linkage based on reporterMode:
+  // For 'SELF', if patient is not provided but user is a patient, link authenticated user.
+  // For 'OTHER', patient must remain null/unidentified until verified.
+  let resolvedPatientId = undefined;
+  if (reporterMode === "OTHER") {
+    resolvedPatientId = undefined;
+  } else if (patient) {
     const patientExists = await User.exists({ _id: patient, role: "patient" });
     if (!patientExists) {
       const err = new Error("Patient not found");
       err.statusCode = 404;
       throw err;
     }
+    resolvedPatientId = new mongoose.Types.ObjectId(patient);
+  } else if (reporterMode === "SELF" || (!reporterMode && user.role === "patient")) {
+    resolvedPatientId = new mongoose.Types.ObjectId(user.id);
   }
 
   if (assignedDoctor) {
@@ -272,8 +359,10 @@ const createEmergencyCase = async ({ user, data, ipAddress }) => {
     }
   }
 
+  const initialStatus = "REPORTED";
+
   const emergencyCase = new EmergencyCase({
-    patient: patient ? new mongoose.Types.ObjectId(patient) : undefined,
+    patient: resolvedPatientId,
     reportedBy: new mongoose.Types.ObjectId(user.id),
     incidentType,
     description: description || "",
@@ -285,10 +374,18 @@ const createEmergencyCase = async ({ user, data, ipAddress }) => {
       ? new mongoose.Types.ObjectId(linkedAppointmentId)
       : undefined,
     notes: notes || undefined,
-    status: "REPORTED",
+    victimPhoto: victimPhoto || undefined,
+    reporterMode: reporterMode || undefined,
+    responseType: normalizedResponseType,
+    status: initialStatus,
   });
 
-  emergencyCase.statusTimestamps = new Map([["REPORTED", new Date()]]);
+  emergencyCase.statusTimestamps = new Map([[initialStatus, new Date()]]);
+
+  if (normalizedResponseType === "AMBULANCE_EMERGENCY") {
+    emergencyCase.status = "AMBULANCE_REQUESTED";
+    emergencyCase.statusTimestamps.set("AMBULANCE_REQUESTED", new Date());
+  }
 
   await emergencyCase.save();
 
@@ -303,13 +400,36 @@ const createEmergencyCase = async ({ user, data, ipAddress }) => {
       incidentType,
       severity,
       assignedHospital: assignedHospital || null,
-      patientId: patient || null,
+      patientId: resolvedPatientId ? resolvedPatientId.toString() : null,
+      responseType: normalizedResponseType,
+      reporterMode: reporterMode || null,
     },
   });
 
   emitCaseSocket("emergency-created", emergencyCase, {
     createdBy: user.id,
   });
+
+  if (normalizedResponseType === "AMBULANCE_EMERGENCY") {
+    emitSocket("ambulance-emergency-requested", {
+      emergencyCaseId: emergencyCase._id.toString(),
+      severity,
+      incidentType,
+      location: emergencyCase.location,
+    });
+    emitSocket("emergency-status-updated", {
+      emergencyCaseId: emergencyCase._id.toString(),
+      status: "AMBULANCE_REQUESTED",
+      severity,
+      incidentType,
+    });
+    emitSocket("hospital-emergency-alert", {
+      emergencyCaseId: emergencyCase._id.toString(),
+      severity,
+      incidentType,
+      hospitalName: emergencyCase.assignedHospital,
+    });
+  }
 
   const populated = await EmergencyCase.findById(emergencyCase._id)
     .populate("patient", "name email phone bloodGroup healthSummary")
@@ -400,6 +520,12 @@ const updateEmergencyStatus = async ({ user, id, newStatus, ipAddress, cancelled
     throw err;
   }
 
+  if (newStatus === "PATIENT_IDENTIFIED" && !emergencyCase.patient) {
+    const err = new Error("Patient must be confirmed before marking the case as identified");
+    err.statusCode = 400;
+    throw err;
+  }
+
   if (newStatus === "CANCELLED") {
     if (!canCancelCase(user, emergencyCase)) {
       const err = new Error("Forbidden: Not authorized to cancel this emergency case");
@@ -414,7 +540,7 @@ const updateEmergencyStatus = async ({ user, id, newStatus, ipAddress, cancelled
     }
   }
 
-  assertValidStatusTransition(emergencyCase.status, newStatus);
+  assertValidStatusTransition(emergencyCase.status, newStatus, emergencyCase.responseType);
 
   const oldStatus = emergencyCase.status;
   emergencyCase.status = newStatus;
@@ -597,6 +723,23 @@ const updateEmergencyDetails = async ({ user, id, data, ipAddress }) => {
     }
   }
 
+  if (data.victimPhoto !== undefined) {
+    if (data.victimPhoto === null) {
+      emergencyCase.victimPhoto = undefined;
+      changedFields.victimPhoto = null;
+    } else {
+      emergencyCase.victimPhoto = data.victimPhoto;
+      changedFields.victimPhoto = true;
+    }
+  }
+
+  if (data.reporterMode !== undefined) {
+    if (["SELF", "OTHER"].includes(data.reporterMode)) {
+      emergencyCase.reporterMode = data.reporterMode;
+      changedFields.reporterMode = data.reporterMode;
+    }
+  }
+
   await emergencyCase.save();
 
   await logAction({
@@ -625,6 +768,161 @@ const updateEmergencyDetails = async ({ user, id, data, ipAddress }) => {
   return populated;
 };
 
+const ARRIVAL_RADIUS_METERS = 75;
+
+const calculateDistanceMeters = (lat1, lon1, lat2, lon2) => {
+  const nLat1 = Number(lat1);
+  const nLon1 = Number(lon1);
+  const nLat2 = Number(lat2);
+  const nLon2 = Number(lon2);
+
+  if (isNaN(nLat1) || isNaN(nLon1) || isNaN(nLat2) || isNaN(nLon2)) {
+    return null;
+  }
+  const R = 6371e3; // Earth radius in meters
+  const rad = Math.PI / 180;
+  const phi1 = nLat1 * rad;
+  const phi2 = nLat2 * rad;
+  const deltaPhi = (nLat2 - nLat1) * rad;
+  const deltaLambda = (nLon2 - nLon1) * rad;
+
+  const a =
+    Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
+    Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return Math.round(R * c);
+};
+
+const updateAmbulanceLocation = async ({ user, id, coords, ipAddress }) => {
+  if (!coords || typeof coords.latitude !== "number" || typeof coords.longitude !== "number") {
+    const err = new Error("Valid latitude and longitude numbers are required");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const emergencyCase = await EmergencyCase.findById(id);
+  if (!emergencyCase) {
+    const err = new Error("Emergency case not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  // Location Security: Only the assigned ambulance (or admin) can update location
+  const userId = String(user.id || user._id);
+  const assignedAmbulanceId = getEntityId(emergencyCase.assignedAmbulance);
+
+  if (user.role !== "admin" && (!assignedAmbulanceId || assignedAmbulanceId !== userId)) {
+    const err = new Error("Forbidden: You are not the assigned ambulance for this emergency case");
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (isTerminalStatus(emergencyCase.status)) {
+    const err = new Error(`Cannot update location for a ${emergencyCase.status.toLowerCase()} case`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  emergencyCase.ambulanceLocation = {
+    latitude: coords.latitude,
+    longitude: coords.longitude,
+    accuracy: coords.accuracy || undefined,
+    heading: coords.heading || undefined,
+    speed: coords.speed || undefined,
+    updatedAt: new Date(),
+  };
+
+  let distanceMeters = null;
+  let etaMinutes = null;
+
+  if (
+    emergencyCase.location &&
+    typeof emergencyCase.location.latitude === "number" &&
+    typeof emergencyCase.location.longitude === "number"
+  ) {
+    distanceMeters = calculateDistanceMeters(
+      coords.latitude,
+      coords.longitude,
+      emergencyCase.location.latitude,
+      emergencyCase.location.longitude
+    );
+
+    if (distanceMeters !== null) {
+      // Estimate at 40 km/h average city transit
+      etaMinutes = Math.max(1, Math.round((distanceMeters / 1000 / 40) * 60));
+    }
+  }
+
+  let autoArrived = false;
+  // Geofencing Check: If assigned and within arrival radius, transition automatically
+  if (
+    emergencyCase.status === "AMBULANCE_ASSIGNED" &&
+    distanceMeters !== null &&
+    distanceMeters <= ARRIVAL_RADIUS_METERS
+  ) {
+    emergencyCase.status = "AMBULANCE_ARRIVED";
+    if (!emergencyCase.statusTimestamps) {
+      emergencyCase.statusTimestamps = new Map();
+    }
+    emergencyCase.statusTimestamps.set("AMBULANCE_ARRIVED", new Date());
+    autoArrived = true;
+
+    await logAction({
+      userId: new mongoose.Types.ObjectId(user.id),
+      role: user.role,
+      action: "AMBULANCE_ARRIVED_AUTO",
+      module: "EMERGENCY",
+      targetId: emergencyCase._id.toString(),
+      ipAddress,
+      details: {
+        distanceMeters,
+        arrivalRadius: ARRIVAL_RADIUS_METERS,
+        coords,
+      },
+    });
+
+    emitCaseSocket("emergency-status-updated", emergencyCase, {
+      oldStatus: "AMBULANCE_ASSIGNED",
+      newStatus: "AMBULANCE_ARRIVED",
+      updatedBy: user.id,
+      autoTriggered: true,
+    });
+
+    emitSocket("ambulance-arrived", {
+      emergencyCaseId: emergencyCase._id.toString(),
+      status: "AMBULANCE_ARRIVED",
+      distanceMeters,
+      coords,
+    });
+  }
+
+  await emergencyCase.save();
+
+  // Real-time location stream event
+  const locationPayload = {
+    emergencyCaseId: emergencyCase._id.toString(),
+    ambulanceLocation: emergencyCase.ambulanceLocation,
+    distanceMeters,
+    etaMinutes,
+    status: emergencyCase.status,
+    autoArrived,
+  };
+
+  emitSocket("ambulance-location-updated", locationPayload);
+  emitCaseSocket("ambulance-location-updated", emergencyCase, locationPayload);
+
+  return {
+    success: true,
+    emergencyCaseId: emergencyCase._id,
+    ambulanceLocation: emergencyCase.ambulanceLocation,
+    distanceMeters,
+    etaMinutes,
+    status: emergencyCase.status,
+    autoArrived,
+  };
+};
+
 const cancelEmergencyCase = async ({ user, id, cancelledReason, ipAddress }) => {
   return updateEmergencyStatus({
     user,
@@ -641,12 +939,18 @@ module.exports = {
   getAccessibleEmergencyCases,
   updateEmergencyStatus,
   updateEmergencyDetails,
+  updateAmbulanceLocation,
   cancelEmergencyCase,
+  canViewCase,
+  calculateDistanceMeters,
+  ARRIVAL_RADIUS_METERS,
   INCIDENT_TYPES: EmergencyCase.INCIDENT_TYPES,
   SEVERITY_LEVELS: EmergencyCase.SEVERITY_LEVELS,
   STATUSES: EmergencyCase.STATUSES,
+  RESPONSE_TYPES: EmergencyCase.RESPONSE_TYPES,
   LIFECYCLE_ORDER,
   VALID_TRANSITIONS,
+  VALID_TRANSITIONS_DOCTOR,
   isTerminalStatus,
   isValidStatusTransition,
   assertValidStatusTransition,

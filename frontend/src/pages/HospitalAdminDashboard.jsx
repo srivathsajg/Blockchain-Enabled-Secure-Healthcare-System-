@@ -29,7 +29,8 @@ import {
     IndianRupee,
     PieChart as PieChartIcon,
     BarChart3,
-    ActivitySquare
+    ActivitySquare,
+    Volume2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -72,6 +73,7 @@ import { getBaseUrl, updateProfile } from '../services/userApi';
 import Loader from '../components/ui/Loader';
 import SettingsView from '../components/ui/SettingsView';
 import HospitalInsuranceView from '../components/admin/HospitalInsuranceView';
+import NotificationSoundsManager from '../components/admin/NotificationSoundsManager';
 import socket from '../services/socket';
 import NotificationBell from '../components/ui/NotificationBell';
 import { useSocketNotifications } from '../hooks/useSocketNotifications';
@@ -128,6 +130,10 @@ const titleMap = {
         title: 'Blockchain Status',
         subtitle: 'Review verification status for hospital records and lab transactions.',
     },
+    notificationSounds: {
+        title: 'Notification Sounds',
+        subtitle: 'Upload, assign and manage custom audio alerts for real-time events in this hospital.',
+    },
     settings: {
         title: 'Settings',
         subtitle: 'Update hospital admin preferences and profile details.',
@@ -136,7 +142,7 @@ const titleMap = {
 
 const HospitalAdminDashboard = () => {
     const { user, logout } = useAuth();
-    const [notificationCount, resetNotifications] = useSocketNotifications({ userId: user?.id, hospitalName: user?.hospitalName });
+    const [notificationCount, resetNotifications, , notifications, markNotificationRead] = useSocketNotifications({ userId: user?.id, hospitalName: user?.hospitalName, notificationPrefs: user?.notificationPreferences });
     const location = useLocation();
     const [activeView, setActiveView] = useState('dashboard');
 
@@ -186,6 +192,7 @@ const HospitalAdminDashboard = () => {
                     <SidebarItem icon={Shield} label="Patient Insurance" active={activeView === 'insurance'} onClick={() => setActiveView('insurance')} />
                     <SidebarItem icon={ActivitySquare} label="Audit Logs" active={activeView === 'audit'} onClick={() => setActiveView('audit')} />
                     <SidebarItem icon={Database} label="Blockchain" active={activeView === 'blockchain'} onClick={() => setActiveView('blockchain')} />
+                    <SidebarItem icon={Volume2} label="Notification Sounds" active={activeView === 'notificationSounds'} onClick={() => setActiveView('notificationSounds')} />
                 </nav>
 
                 <div className="space-y-1.5 border-t border-white/5 px-4 py-6 bg-black/20">
@@ -211,7 +218,7 @@ const HospitalAdminDashboard = () => {
                         </motion.div>
 
                         <div className="flex items-center gap-4 self-start md:self-auto">
-                            <NotificationBell count={notificationCount} onClick={resetNotifications} />
+                            <NotificationBell count={notificationCount} notifications={notifications} onClick={resetNotifications} onMarkRead={markNotificationRead} />
                             
                             <div className="flex items-center gap-4 pl-4 border-l border-white/5">
                                 <div className="text-right hidden sm:block">
@@ -253,6 +260,7 @@ const HospitalAdminDashboard = () => {
                             {activeView === 'insurance' ? <HospitalInsuranceView /> : null}
                             {activeView === 'audit' ? <AuditLogsView /> : null}
                             {activeView === 'blockchain' ? <BlockchainView /> : null}
+                            {activeView === 'notificationSounds' ? <NotificationSoundsManager /> : null}
                             {activeView === 'settings' ? <SettingsView /> : null}
                         </motion.div>
                     </AnimatePresence>

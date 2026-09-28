@@ -8,7 +8,7 @@ const Login = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { login } = useAuth();
-  
+
   const [formData, setFormData] = useState({
     identifier: '',
     password: ''
@@ -40,20 +40,54 @@ const Login = () => {
       });
 
       if (response.data.success) {
+        console.log('=== LOGIN SUCCESS DEBUG ===');
+        console.log('User:', response.data.user);
+        console.log('Role:', response.data.user.role);
+        console.log('Token exists:', !!response.data.token);
+
         login(response.data.user, response.data.token);
+
         // Redirect to dashboard based on role or to previous location
         if (from !== '/') {
-            navigate(from, { replace: true });
+          console.log('Redirecting to previous location:', from);
+          navigate(from, { replace: true });
         } else {
-            // Default redirects based on role
-            const role = response.data.user.role;
-            if (role === 'patient') navigate('/patient-dashboard');
-            else if (role === 'doctor') navigate('/doctor-dashboard');
-            else if (role === 'pharmacist') navigate('/pharmacy-dashboard');
-            else if (role === 'delivery') navigate('/delivery-dashboard');
-            else if (role === 'lab_technician') navigate('/lab-dashboard');
-            else if (role === 'admin') navigate('/admin-dashboard');
-            else navigate('/');
+          // Default redirects based on role
+          const role = response.data.user.role;
+          console.log('Determining redirect for role:', role);
+
+          if (role === 'patient') {
+            console.log('→ Redirecting to /patient-dashboard');
+            navigate('/patient-dashboard');
+          }
+          else if (role === 'doctor') {
+            console.log('→ Redirecting to /doctor-dashboard');
+            navigate('/doctor-dashboard');
+          }
+          else if (role === 'pharmacist') {
+            console.log('→ Redirecting to /pharmacy-dashboard');
+            navigate('/pharmacy-dashboard');
+          }
+          else if (role === 'delivery') {
+            console.log('→ Redirecting to /delivery-dashboard');
+            navigate('/delivery-dashboard');
+          }
+          else if (role === 'lab_technician') {
+            console.log('→ Redirecting to /lab-dashboard');
+            navigate('/lab-dashboard');
+          }
+          else if (role === 'admin') {
+            console.log('→ Redirecting to /admin-dashboard');
+            navigate('/admin-dashboard');
+          }
+          else if (role === 'ambulance') {
+            console.log('→ Redirecting to /ambulance-dashboard');
+            navigate('/ambulance-dashboard');
+          }
+          else {
+            console.log('→ No matching role, redirecting to Home');
+            navigate('/');
+          }
         }
       }
     } catch (err) {

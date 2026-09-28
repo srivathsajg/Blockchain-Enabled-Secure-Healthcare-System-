@@ -223,7 +223,8 @@ const CustomToolbar = ({ date, onNavigate, onView, view, onBookClick, isAdmitted
                     disabled={isAdmitted}
                     className={`bg-emerald-600 text-white text-[10px] sm:text-xs font-black uppercase tracking-widest px-4 sm:px-5 py-2.5 rounded-full shadow-lg flex items-center gap-2 transition-all whitespace-nowrap ${isAdmitted ? 'opacity-40 cursor-not-allowed' : 'hover:bg-emerald-500 shadow-emerald-500/20'}`}
                 >
-                    <Plus size={14} sm:size={16} /> <span className="hidden xs:inline">Book</span> <span className="hidden sm:inline">Appointment</span>
+                    <Plus size={14} sm:size={16} />
+                    <span>Book Appointment</span>
                 </Motion.button>
             </div>
         </div>

@@ -692,6 +692,7 @@ const bookAppointment = async (req, res) => {
                     assignedHospital: doctorExists.hospitalName || undefined,
                     assignedDoctor: new mongoose.Types.ObjectId(doctorId),
                     linkedAppointmentId: appointment._id,
+                    responseType: "DOCTOR_EMERGENCY",
                     status: "REPORTED",
                     statusTimestamps: new Map([["REPORTED", new Date()]]),
                 });
@@ -1037,6 +1038,52 @@ const respondToReallocation = async (req, res) => {
   }
 };
 
+const respondToDelayRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { accept } = req.body;
+    const patientId = req.user.id;
+    if (typeof accept !== "boolean") {
+      return res.status(400).json({ success: false, message: "accept must be a boolean" });
+    }
+
+    const appointment = await Appointment.findOne({ _id: id, patientId });
+    if (!appointment) return res.status(404).json({ success: false, message: "Appointment not found" });
+    if (appointment.delayRequestStatus !== "pending") {
+      return res.status(400).json({ success: false, message: "No pending delay request for this appointment" });
+    }
+
+    const oldTime = appointment.time;
+    appointment.delayRequestStatus = accept ? "accepted" : "rejected";
+    if (accept) {
+      appointment.time = appointment.proposedTime;
+      appointment.status = "approved";
+    }
+    await appointment.save();
+
+    const payload = {
+      appointmentId: appointment._id,
+      patientId: appointment.patientId,
+      doctorId: appointment.doctorId,
+      oldTime,
+      proposedTime: appointment.proposedTime,
+      reason: appointment.delayReason,
+      message: appointment.delayMessage,
+      delayRequestStatus: appointment.delayRequestStatus,
+      status: appointment.status,
+    };
+    const io = socket.getIO();
+    io.to(String(appointment.doctorId)).emit(accept ? "patient-delay-accepted" : "patient-delay-rejected", payload);
+    io.to(String(appointment.doctorId)).emit("appointment-updated", payload);
+    io.to(String(patientId)).emit("appointment-updated", payload);
+
+    res.json({ success: true, message: accept ? "New appointment time accepted" : "Delay request declined; the original time remains", data: appointment });
+  } catch (error) {
+    console.error("Error responding to delay request:", error);
+    res.status(500).json({ success: false, message: "Server error responding to delay request" });
+  }
+};
+
 const getLabOrders = async (req, res) => {
     try {
         const patientId = req.user.id;
@@ -1192,7 +1239,8 @@ module.exports = {
   cancelAppointment,
   updateInsurance,
   getInsuranceClaims,
-  respondToReallocation,
+    respondToReallocation,
+    respondToDelayRequest,
   getLabOrders,
   rateAppointment,
   getDoctorReviews,

@@ -14,6 +14,11 @@ const INCIDENT_TYPES = [
 
 const SEVERITY_LEVELS = ["LOW", "MODERATE", "HIGH", "CRITICAL"];
 
+const RESPONSE_TYPES = [
+  "AMBULANCE_EMERGENCY",
+  "DOCTOR_EMERGENCY",
+];
+
 const EMERGENCY_STATUSES = [
   "REPORTED",
   "AMBULANCE_REQUESTED",
@@ -35,9 +40,37 @@ const emergencyLocationSchema = new Schema({
   longitude: {
     type: Number,
   },
+  accuracy: {
+    type: Number,
+  },
+  timestamp: {
+    type: Date,
+  },
   address: {
     type: String,
     trim: true,
+  },
+});
+
+const ambulanceLocationSchema = new Schema({
+  latitude: {
+    type: Number,
+  },
+  longitude: {
+    type: Number,
+  },
+  accuracy: {
+    type: Number,
+  },
+  heading: {
+    type: Number,
+  },
+  speed: {
+    type: Number,
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now,
   },
 });
 
@@ -69,6 +102,9 @@ const emergencyCaseSchema = new Schema({
     type: emergencyLocationSchema,
     default: () => ({}),
   },
+  ambulanceLocation: {
+    type: ambulanceLocationSchema,
+  },
   assignedAmbulance: {
     type: Schema.Types.ObjectId,
     ref: "User",
@@ -95,6 +131,11 @@ const emergencyCaseSchema = new Schema({
     of: Date,
     default: () => new Map(),
   },
+  responseType: {
+    type: String,
+    enum: RESPONSE_TYPES,
+    default: "AMBULANCE_EMERGENCY",
+  },
   linkedAppointmentId: {
     type: Schema.Types.ObjectId,
     ref: "Appointment",
@@ -105,6 +146,15 @@ const emergencyCaseSchema = new Schema({
   },
   cancelledReason: {
     type: String,
+    trim: true,
+  },
+  victimPhoto: {
+    type: String,
+    trim: true,
+  },
+  reporterMode: {
+    type: String,
+    enum: ["SELF", "OTHER"],
     trim: true,
   },
   createdAt: {
@@ -134,7 +184,8 @@ emergencyCaseSchema.pre("save", function (next) {
 emergencyCaseSchema.statics.INCIDENT_TYPES = INCIDENT_TYPES;
 emergencyCaseSchema.statics.SEVERITY_LEVELS = SEVERITY_LEVELS;
 emergencyCaseSchema.statics.STATUSES = EMERGENCY_STATUSES;
+emergencyCaseSchema.statics.RESPONSE_TYPES = RESPONSE_TYPES;
 
-const EmergencyCase = mongoose.model("EmergencyCase", emergencyCaseSchema);
+const EmergencyCase = mongoose.models.EmergencyCase || mongoose.model("EmergencyCase", emergencyCaseSchema);
 
 module.exports = EmergencyCase;

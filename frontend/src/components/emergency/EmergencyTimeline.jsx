@@ -14,6 +14,14 @@ export const LIFECYCLE_ORDER = [
     'CLOSED',
 ];
 
+export const DOCTOR_LIFECYCLE_ORDER = [
+    'REPORTED',
+    'DOCTOR_NOTIFIED',
+    'DOCTOR_HANDLING',
+    'UNDER_TREATMENT',
+    'CLOSED',
+];
+
 export const STATUS_LABELS = {
     REPORTED: 'Emergency Reported',
     AMBULANCE_REQUESTED: 'Ambulance Requested',
@@ -25,6 +33,17 @@ export const STATUS_LABELS = {
     ARRIVED_AT_HOSPITAL: 'Arrived at Hospital',
     UNDER_TREATMENT: 'Under Treatment',
     CLOSED: 'Case Closed',
+    CANCELLED: 'Cancelled',
+    DOCTOR_NOTIFIED: 'Doctor Notified',
+    DOCTOR_HANDLING: 'Doctor Handling Emergency',
+};
+
+export const DOCTOR_STATUS_LABELS = {
+    REPORTED: 'Emergency Reported',
+    DOCTOR_NOTIFIED: 'Doctor Notified',
+    DOCTOR_HANDLING: 'Doctor Handling Emergency',
+    UNDER_TREATMENT: 'Under Treatment',
+    CLOSED: 'Emergency Completed',
     CANCELLED: 'Cancelled',
 };
 
@@ -39,36 +58,62 @@ const formatTimestamp = (ts) => {
     }
 };
 
-const getStatusColor = (status, isCompleted) => {
+const getStatusColor = (status, isCompleted, responseType) => {
     if (status === 'CANCELLED') return 'text-gray-400 border-gray-500/40 bg-gray-500/10';
-    if (status === 'CLOSED') return 'text-blue-400 border-blue-500/40 bg-blue-500/10';
+    if (status === 'CLOSED') return responseType === 'DOCTOR_EMERGENCY' ? 'text-green-400 border-green-500/40 bg-green-500/10' : 'text-blue-400 border-blue-500/40 bg-blue-500/10';
     if (isCompleted) return 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10';
     return 'text-gray-500 border-white/10 bg-white/[0.02]';
 };
 
-const EmergencyTimeline = ({ statusTimestamps, currentStatus = 'REPORTED', cancelledReason = '' }) => {
+const EmergencyTimeline = ({ statusTimestamps, currentStatus = 'REPORTED', cancelledReason = '', responseType = 'AMBULANCE_EMERGENCY' }) => {
+    const isDoctorEmergency = responseType === 'DOCTOR_EMERGENCY';
+    const lifecycle = isDoctorEmergency ? DOCTOR_LIFECYCLE_ORDER : LIFECYCLE_ORDER;
+    const labels = isDoctorEmergency ? DOCTOR_STATUS_LABELS : STATUS_LABELS;
     const safeTimestamps = statusTimestamps || {};
 
-    const timestampAt = (stage) => {
+    const getEffectiveTimestamp = (stage) => {
         if (!safeTimestamps) return null;
-        if (safeTimestamps instanceof Map) return safeTimestamps.get(stage) || null;
-        if (typeof safeTimestamps === 'object') return safeTimestamps[stage] || null;
-        return null;
+        const get = (s) => {
+            if (safeTimestamps instanceof Map) return safeTimestamps.get(s) || null;
+            if (typeof safeTimestamps === 'object') return safeTimestamps[s] || null;
+            return null;
+        };
+        if (stage === 'DOCTOR_NOTIFIED') return get('REPORTED');
+        if (stage === 'DOCTOR_HANDLING') return get('UNDER_TREATMENT');
+        return get(stage);
     };
 
-    const currentIdx = LIFECYCLE_ORDER.indexOf(currentStatus);
+    const timestampAt = (stage) => getEffectiveTimestamp(stage);
+
+    let currentIdx = lifecycle.indexOf(currentStatus);
+    if (currentIdx === -1 && isDoctorEmergency) {
+        if (currentStatus === 'UNDER_TREATMENT') currentIdx = 3;
+        else if (currentStatus === 'REPORTED') currentIdx = 0;
+        else if (currentStatus === 'CLOSED') currentIdx = 4;
+    }
 
     const isCancelled = currentStatus === 'CANCELLED';
     const isClosed = currentStatus === 'CLOSED';
 
+    const isStageCurrent = (stage, idx) => {
+        if (currentStatus === stage) return true;
+        if (!isDoctorEmergency) return false;
+        if (currentStatus === 'UNDER_TREATMENT' && stage === 'UNDER_TREATMENT') return true;
+        if (currentStatus === 'CLOSED') return false;
+        if (currentStatus === 'REPORTED' && stage === 'REPORTED') return true;
+        return false;
+    };
+
     return (
         <div className="w-full">
             <div className="relative space-y-1">
-                {LIFECYCLE_ORDER.map((stage, idx) => {
+                {lifecycle.map((stage, idx) => {
                     const completedAt = timestampAt(stage);
-                    const isCompleted = !!completedAt || (currentIdx >= 0 && idx < currentIdx) || isClosed;
-                    const isCurrent = currentStatus === stage;
-                    const color = getStatusColor(stage, isCompleted);
+                    let isCompleted = !!completedAt;
+                    if (currentIdx >= 0 && idx < currentIdx) isCompleted = true;
+                    if (isClosed) isCompleted = true;
+                    const isCurrent = isStageCurrent(stage, idx);
+                    const color = getStatusColor(stage, isCompleted, responseType);
 
                     return (
                         <div key={stage} className="relative flex gap-4 min-h-[62px]">
@@ -82,7 +127,7 @@ const EmergencyTimeline = ({ statusTimestamps, currentStatus = 'REPORTED', cance
                                         <Circle size={14} className="opacity-40" />
                                     )}
                                 </div>
-                                {idx < LIFECYCLE_ORDER.length - 1 && (
+                                {idx < lifecycle.length - 1 && (
                                     <div
                                         className={`absolute top-8 w-[2px] h-[calc(100%-28px)] ${isCompleted ? 'bg-emerald-500/40' : 'bg-white/[0.06]'}`}
                                     />
@@ -91,7 +136,7 @@ const EmergencyTimeline = ({ statusTimestamps, currentStatus = 'REPORTED', cance
                             <div className="flex-1 pb-5">
                                 <div className="flex flex-wrap items-center gap-2">
                                     <span className={`text-sm font-bold tracking-wide ${isCompleted ? 'text-gray-100' : 'text-gray-500'}`}>
-                                        {STATUS_LABELS[stage] || stage}
+                                        {labels[stage] || stage}
                                     </span>
                                     {isCurrent && !isCancelled && (
                                         <span className="text-[10px] font-black uppercase tracking-[0.15em] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/30">
@@ -121,7 +166,7 @@ const EmergencyTimeline = ({ statusTimestamps, currentStatus = 'REPORTED', cance
                             </div>
                             <div className="flex-1 min-w-0">
                                 <p className="text-sm font-bold text-gray-300 tracking-wide">
-                                    {STATUS_LABELS.CANCELLED}
+                                    {(isDoctorEmergency ? DOCTOR_STATUS_LABELS : STATUS_LABELS).CANCELLED}
                                 </p>
                                 <p className="text-[11px] text-gray-500 mt-0.5">
                                     {formatTimestamp(timestampAt('CANCELLED')) || ''}
