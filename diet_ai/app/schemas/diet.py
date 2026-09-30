@@ -9,9 +9,13 @@ from pydantic import BaseModel, ConfigDict
 
 class FoodItem(BaseModel):
     name: str
+    display_name: Optional[str] = None
     recipe_id: str
+    food_id: Optional[str] = None
+    food_family: Optional[str] = None
     quantity_servings: float
     quantity_g: float
+    nutrition: Optional[Dict[str, float]] = None
     calories: float
     protein_g: float
     carbs_g: float
@@ -21,10 +25,13 @@ class FoodItem(BaseModel):
     calcium_mg: float
     vitamin_c_mg: float
     sodium_mg: float
-    cost_usd: Optional[float]
+    cost_usd: Optional[float] = None
     meal_slot: str
     suitability_score: float
     why_recommended: str
+    reasons: List[Dict[str, str]] = []
+    validation_status: str = "PASS"
+    data_quality_status: str = "VERIFIED_SOURCE"
     is_vegetarian: bool
     cuisine: str
 
@@ -76,7 +83,9 @@ class ValidationResult(BaseModel):
     diet_type: bool
     no_repetition: bool = True
     overall: bool
+    validation_status: str = "PASS"
     badge: str = "Within Target"
+    status_message: Optional[str] = None
 
 
 class ModelInfo(BaseModel):

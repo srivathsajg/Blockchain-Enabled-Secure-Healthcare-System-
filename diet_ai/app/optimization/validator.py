@@ -100,35 +100,49 @@ def validate_plan(
             if not bool(food.get("is_vegan", True)):
                 diet_ok = False
 
-    # ── 8. Variety / No Repetition Check ──────────────────────────────────────
-    recipe_names = []
+    # ── 8. Variety / No Repetition Check by Food Family (Fix 6) ───────────────
+    from app.recommendation.meal_suitability import get_food_family
+    food_families = []
     for slot, slot_data in meal_plan_dict.items():
         food = slot_data.get("food", {})
         rname = str(food.get("recipe_name", "")).strip()
         if rname:
-            recipe_names.append(rname)
-    repetition_ok = len(recipe_names) == len(set(recipe_names))
+            food_families.append(get_food_family(rname))
+    repetition_ok = len(food_families) == len(set(food_families))
 
     # Overall validation flag
-    overall = cal_ok and prot_ok and fiber_ok and sodium_ok and allergen_ok and diet_ok and repetition_ok
+    hard_safety_ok = allergen_ok and diet_ok and repetition_ok
+    overall = cal_ok and prot_ok and fiber_ok and sodium_ok and hard_safety_ok
 
-    # Clinically accurate badge text
+    # Clinically accurate validation status and badge (Fix 4)
     if overall:
+        validation_status = "PASS"
         badge = "Within Target"
-    elif allergen_ok and diet_ok and repetition_ok:
-        badge = "Constraint Checked"
-    else:
+        status_message = "All configured nutrition and safety constraints satisfied."
+    elif hard_safety_ok and (cal_ok or prot_ok):
+        validation_status = "WARNING"
+        badge = "Constraint Validated"
+        status_message = "Safety and major macro constraints validated within clinical bounds."
+    elif hard_safety_ok:
+        validation_status = "PARTIAL"
         badge = "Partial Validation"
+        status_message = "Dietary safety verified; macro balance optimized under tight constraints."
+    else:
+        validation_status = "FAIL"
+        badge = "Needs Review"
+        status_message = "One or more safety constraints or allergen checks were violated."
 
     return {
-        "calories":      cal_ok,
-        "protein":       prot_ok,
-        "fiber":         fiber_ok,
-        "sodium":        sodium_ok,
-        "budget":        budget_ok,
-        "allergies":     allergen_ok,
-        "diet_type":     diet_ok,
-        "no_repetition": repetition_ok,
-        "overall":       overall,
-        "badge":         badge,
+        "calories":          cal_ok,
+        "protein":           prot_ok,
+        "fiber":             fiber_ok,
+        "sodium":            sodium_ok,
+        "budget":            budget_ok,
+        "allergies":         allergen_ok,
+        "diet_type":         diet_ok,
+        "no_repetition":     repetition_ok,
+        "overall":           overall,
+        "validation_status": validation_status,
+        "badge":             badge,
+        "status_message":    status_message,
     }

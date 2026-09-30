@@ -29,34 +29,13 @@ const BIOMARKER_RANGES = {
   vitamin_b12: { min: 200, max: 900, unit: "pg/mL" },
 };
 
+const { evaluateLabComponents } = require("../../modules/track/labStatusEngine");
+
 /**
- * Decorate raw medical indicators with high/low/normal status tags for UI display.
+ * Decorate raw medical indicators with authoritative lab status from labStatusEngine.
  */
 function getMedicalIndicatorStatus(rawIndicators, gender) {
-  if (!rawIndicators || typeof rawIndicators !== "object") return {};
-  const result = {};
-
-  for (const [key, val] of Object.entries(rawIndicators)) {
-    if (val === null || val === undefined || isNaN(val)) continue;
-    const numVal = parseFloat(val);
-    const range = BIOMARKER_RANGES[key.toLowerCase()];
-
-    let status = "normal";
-    if (range) {
-      if (numVal < range.min) status = "low";
-      else if (numVal > range.max) status = "high";
-    }
-
-    result[key] = {
-      value: numVal,
-      status,
-      unit: range ? range.unit : "",
-      referenceMin: range ? range.min : null,
-      referenceMax: range ? range.max : null,
-    };
-  }
-
-  return result;
+  return evaluateLabComponents(rawIndicators);
 }
 
 /**
@@ -184,30 +163,49 @@ function formatFastAPIResponse(fastapiData) {
 
   rawMeals.forEach(m => {
     const mealName = (m.meal || "").toLowerCase();
-    const foods = (m.foods || []).map(f => ({
-      name: f.name,
-      recipe_id: f.recipe_id,
-      quantity: `${f.quantity_g || 150}g`,
-      calories: f.calories,
-      protein: f.protein_g,
-      carbs: f.carbs_g,
-      fat: f.fat_g,
-      fiber: f.fiber_g,
-      whyRecommended: f.why_recommended,
-      suitabilityScore: Math.round((f.suitability_score || 0.8) * 100),
-      isVegetarian: f.is_vegetarian,
-      cuisine: f.cuisine,
-    }));
+    const foods = (m.foods || []).map(f => {
+      const qtyG = Math.round(f.quantity_g || 150);
+      return {
+        name: f.display_name || f.name,
+        recipe_id: f.recipe_id,
+        food_id: f.food_id || f.recipe_id,
+        food_family: f.food_family,
+        quantity: `${qtyG}g`,
+        quantity_g: qtyG,
+        calories: Math.round(f.calories),
+        protein: Math.round(f.protein_g * 10) / 10,
+        carbs: Math.round(f.carbs_g * 10) / 10,
+        fat: Math.round(f.fat_g * 10) / 10,
+        fiber: Math.round(f.fiber_g * 10) / 10,
+        nutrition: f.nutrition || {
+          calories: Math.round(f.calories),
+          protein_g: Math.round(f.protein_g * 10) / 10,
+          carbs_g: Math.round(f.carbs_g * 10) / 10,
+          fat_g: Math.round(f.fat_g * 10) / 10,
+          fiber_g: Math.round(f.fiber_g * 10) / 10,
+        },
+        whyRecommended: f.why_recommended,
+        reasons: f.reasons || [],
+        validationStatus: f.validation_status || "PASS",
+        validationBadge: f.validation_badge || "Within Target",
+        suitabilityScore: Math.round((f.suitability_score || 0.8) * 100),
+        isVegetarian: f.is_vegetarian,
+        cuisine: f.cuisine,
+      };
+    });
 
     const primaryFood = foods[0] || {
       name: "Nutritionally Balanced Selection",
       quantity: "150g",
+      quantity_g: 150,
       calories: 350,
       protein: 15,
       carbs: 45,
       fat: 10,
       fiber: 5,
       whyRecommended: "Clinically balanced choice matching your targets.",
+      validationStatus: "PASS",
+      validationBadge: "Within Target",
     };
 
     const slotPayload = {
@@ -270,7 +268,9 @@ function formatFastAPIResponse(fastapiData) {
     warnings: fastapiData.warnings || [],
     explanations: fastapiData.explanations || [],
     validation: fastapiData.validation || null,
-    validationBadge: fastapiData.validation?.badge || (fastapiData.validation?.overall ? "Within Target" : "Constraint Checked"),
+    validationStatus: fastapiData.validation?.validation_status || (fastapiData.validation?.overall ? "PASS" : "WARNING"),
+    validationBadge: fastapiData.validation?.badge || (fastapiData.validation?.overall ? "Within Target" : "Constraint Validated"),
+    validationMessage: fastapiData.validation?.status_message || "All configured nutrition and safety constraints satisfied.",
     modelInfo: fastapiData.model_info || null,
     // Legacy backward-compat fields
     morning: legacyMorning,

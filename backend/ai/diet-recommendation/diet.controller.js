@@ -5,6 +5,7 @@
  */
 
 const { getMedicalIndicatorStatus, predictDietFastAPI } = require("./diet.service");
+const { getTrackedDietPlan, refreshTrackedDietPlan } = require("../../modules/track/track.controller");
 const { getFoodImageUrl } = require("./foodImage.service");
 const DietPlan = require("../../modules/diet-recommendation/models/dietPlan.model");
 const Record = require("../../modules/medical-records/models/record.model");
@@ -246,8 +247,8 @@ const getFoodImage = async (req, res) => {
 };
 
 module.exports = {
-  getLatestDietPlan,
+  getLatestDietPlan: getTrackedDietPlan,
   getDietRecommendation,
-  refreshDietPlan,
+  refreshDietPlan: refreshTrackedDietPlan,
   getFoodImage,
 };

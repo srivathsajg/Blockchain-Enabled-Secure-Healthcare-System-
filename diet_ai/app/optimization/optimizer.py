@@ -94,14 +94,18 @@ def optimize_whole_day(
     target_fiber = daily_targets.get("fiber_g", 25.0)
     max_sodium   = daily_targets.get("sodium_mg_max", 2300.0)
 
+    QUANTITY_STEP = 10.0  # 10g discrete increments for deterministic portioning
+
     # ── 1. Create Decision Variables ──────────────────────────────────────────
+    k_vars = {}
     for s in slots:
         df = active_candidates[s]
         for i, row in df.iterrows():
             var_key = (s, i)
             x_vars[var_key] = pulp.LpVariable(f"x_{s}_{i}", cat="Binary")
-            # Portion weight in grams [75g to 450g]
-            w_vars[var_key] = pulp.LpVariable(f"w_{s}_{i}", lowBound=0, upBound=450.0, cat="Continuous")
+            # Discrete portion weight: integer multiplier of QUANTITY_STEP (80g to 420g)
+            k_vars[var_key] = pulp.LpVariable(f"k_{s}_{i}", lowBound=0, upBound=42, cat="Integer")
+            w_vars[var_key] = QUANTITY_STEP * k_vars[var_key]
 
     # ── 2. Objective Function ─────────────────────────────────────────────────
     obj_terms = []
@@ -120,27 +124,28 @@ def optimize_whole_day(
         df = active_candidates[s]
         prob += pulp.lpSum(x_vars[(s, i)] for i in range(len(df))) == 1, f"single_food_{s}"
 
-    # ── 4. Constraint: No Repeated Recipe Names Across Day ────────────────────
-    all_names = set()
-    for s in slots:
-        all_names.update(active_candidates[s]["recipe_name"].dropna().unique())
+    # ── 4. Constraint: Strict Food Family Variety Across Day (Fix 6) ──────────
+    from app.recommendation.meal_suitability import get_food_family
 
-    for name_idx, name in enumerate(all_names):
-        name_vars = []
-        for s in slots:
-            df = active_candidates[s]
-            matching_indices = df[df["recipe_name"] == name].index
-            for i in matching_indices:
-                name_vars.append(x_vars[(s, i)])
-        if len(name_vars) > 1:
-            prob += pulp.lpSum(name_vars) <= 1, f"no_repeat_{name_idx}"
+    family_vars: Dict[str, List[Any]] = {}
+    for s in slots:
+        df = active_candidates[s]
+        for i, row in df.iterrows():
+            fam = get_food_family(str(row.get("recipe_name", "")))
+            if fam not in family_vars:
+                family_vars[fam] = []
+            family_vars[fam].append(x_vars[(s, i)])
+
+    for fam_idx, (fam, vars_list) in enumerate(family_vars.items()):
+        if len(vars_list) > 1:
+            prob += pulp.lpSum(vars_list) <= 1, f"no_repeat_family_{fam_idx}"
 
     # ── 5. Constraint: Linking Portion Weight & Active Selection ───────────────
     for s in slots:
         df = active_candidates[s]
         for i, row in df.iterrows():
             var_key = (s, i)
-            # Portion bounds: 80g min, 420g max when selected
+            # Portion bounds: 80g min, 420g max when selected (in 10g steps)
             prob += w_vars[var_key] >= 80.0 * x_vars[var_key], f"min_portion_{s}_{i}"
             prob += w_vars[var_key] <= 420.0 * x_vars[var_key], f"max_portion_{s}_{i}"
 
@@ -208,7 +213,8 @@ def optimize_whole_day(
             sel_val = pulp.value(x_vars[(s, i)])
             if sel_val is not None and sel_val >= 0.5:
                 w_val = pulp.value(w_vars[(s, i)])
-                chosen_weight = round(float(w_val), 1) if w_val and w_val > 20 else 200.0
+                int_w = int(round(float(w_val) / 10.0)) * 10 if w_val and w_val > 20 else 200
+                chosen_weight = float(max(80, min(420, int_w)))
                 chosen_food = row.to_dict()
                 break
 
@@ -217,10 +223,12 @@ def optimize_whole_day(
             chosen_food = df.iloc[0].to_dict()
             split = slot_splits.get(s, 1.0 / len(slots))
             cals_per_100g = max(float(chosen_food.get("per100g_calories", 150.0)), 10.0)
-            chosen_weight = round((target_cal * split / cals_per_100g) * 100.0, 0)
+            raw_w = (target_cal * split / cals_per_100g) * 100.0
+            chosen_weight = float(max(80, min(420, int(round(raw_w / 10.0)) * 10)))
 
-        # Compute exact portion nutrition using canonical function
+        # Compute exact portion nutrition using canonical function (Fix 2)
         portion_nut = calculate_portion_nutrition(chosen_food, chosen_weight)
+        portion_nut["quantity_g"] = chosen_weight
         solution[s] = {
             "food":              chosen_food,
             "quantity_g":        chosen_weight,
@@ -237,10 +245,11 @@ def _greedy_whole_day_fallback(
     slot_splits: Dict[str, float],
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Greedy whole-day selector enforcing strict zero-repetition across all slots.
+    Greedy whole-day selector enforcing strict zero-repetition across all slots (Fix 6).
     """
+    from app.recommendation.meal_suitability import get_food_family
     solution = {}
-    used_recipe_names = set()
+    used_families = set()
     target_cal = daily_targets.get("calories", 2000.0)
 
     for s, df in slot_candidates.items():
@@ -251,10 +260,10 @@ def _greedy_whole_day_fallback(
 
         chosen_row = None
         for _, row in df.iterrows():
-            rname = str(row.get("recipe_name", ""))
-            if rname not in used_recipe_names:
+            fam = get_food_family(str(row.get("recipe_name", "")))
+            if fam not in used_families:
                 chosen_row = row
-                used_recipe_names.add(rname)
+                used_families.add(fam)
                 break
 
         if chosen_row is None:
@@ -262,8 +271,8 @@ def _greedy_whole_day_fallback(
 
         food_dict = chosen_row.to_dict()
         cals_100g = max(float(food_dict.get("per100g_calories", food_dict.get("calories", 300) / 2.0)), 10.0)
-        portion_g = float(np.clip((slot_target_cal / cals_100g) * 100.0, 100.0, 380.0))
-        portion_g = round(portion_g, 0)
+        raw_g = float(np.clip((slot_target_cal / cals_100g) * 100.0, 80.0, 420.0))
+        portion_g = float(max(80, min(420, int(round(raw_g / 10.0)) * 10)))
 
         solution[s] = {
             "food":              food_dict,

@@ -158,50 +158,22 @@ def load_food_dataframe() -> pd.DataFrame:
     df["cuisine"]   = df["cuisine"].str.strip()
     df["category"]  = df["category"].str.strip()
 
-    # ── Culturally & Clinically Accurate Meal Slot Classification ──────────────
-    def _classify_slots(row) -> frozenset:
-        name = str(row.get("recipe_name", "")).lower()
-        cat = str(row.get("category", "")).lower()
-        
-        # 1. Heavy main courses -> lunch & dinner ONLY (Never breakfast, never snack)
-        if any(x in name for x in [
-            "biryani", "pulao", "palaw", "gosht", "nihari", "haleem", "karahi", "korma",
-            "sajji", "chargha", "vindaloo", "rogan josh", "butter chicken", "ilish",
-            "fish curry", "rezala", "paya", "mantu", "ashak", "dal makhani", "palak paneer",
-            "dal tadka", "curry", "khichuri"
-        ]):
-            return frozenset(["lunch", "dinner"])
-            
-        # 2. Authentic Breakfasts -> breakfast ONLY (Never main meal, never heavy dessert)
-        if any(x in name for x in [
-            "idli", "dosa", "masala dosa", "pitha", "bolani", "naan", "afghan naan",
-            "paratha", "poha", "upma", "thepla", "chole bhature", "bread", "toast",
-            "chilla", "uttapam", "porridge", "sheera"
-        ]):
-            return frozenset(["breakfast"])
-            
-        # 3. Authentic Snacks & Light Dishes -> morning_snack & evening_snack ONLY
-        if any(x in name for x in [
-            "samosa", "chaat", "pani puri", "gol gappa", "dahi bhalla", "makhana",
-            "nuts", "salad", "smoothie", "lassi", "tea", "juice", "soup", "chomchom",
-            "gulab jamun", "firni", "mishti doi", "chilli chicken", "chicken manchurian",
-            "hakka noodles", "paneer tikka", "chicken tikka", "chapli kabab", "chapli kebab", "seekh kabab",
-            "tandoori chicken"
-        ]):
-            return frozenset(["morning_snack", "evening_snack"])
-            
-        # 4. Fallback by Category
-        if cat in ["main course", "rice dishes", "fish dishes", "indo-chinese", "modern fusion"]:
-            return frozenset(["lunch", "dinner"])
-        elif cat in ["bread"]:
-            return frozenset(["breakfast", "lunch", "dinner"])
-        elif cat in ["appetizers", "snacks", "street food", "beverages", "desserts"]:
-            return frozenset(["morning_snack", "evening_snack"])
-        else:
-            return frozenset(["lunch", "dinner"])
+    # ── Meal Suitability & Food Family Enrichment ─────────────────────────────
+    from app.recommendation.meal_suitability import (
+        get_candidate_meal_slots,
+        get_food_family,
+        construct_display_identity,
+        get_data_quality_status,
+    )
 
-    df["allowed_slots"] = df.apply(_classify_slots, axis=1)
-    df["meal_slot"] = df["allowed_slots"].apply(lambda s: next(iter(s)) if s else "lunch")
+    df["allowed_slots"] = df.apply(get_candidate_meal_slots, axis=1)
+    _slot_order = ("breakfast", "morning_snack", "lunch", "evening_snack", "dinner")
+    df["meal_slot"] = df["allowed_slots"].apply(
+        lambda s: next((slot for slot in _slot_order if slot in s), "lunch") if s else "lunch"
+    )
+    df["food_family"] = df["recipe_name"].apply(get_food_family)
+    df["display_name"] = df.apply(construct_display_identity, axis=1)
+    df["data_quality_status"] = df.apply(get_data_quality_status, axis=1)
 
     # ── Drop duplicates (none expected but defensive) ─────────────────────────
     before = len(df)

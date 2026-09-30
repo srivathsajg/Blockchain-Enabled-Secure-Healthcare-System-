@@ -49,16 +49,38 @@ def _build_food_item(
     slot: str,
     suitability_score: float,
     why_text: str,
+    reasons: List[Dict[str, str]] | None = None,
 ) -> FoodItem:
     """Convert an optimized food selection into a verified FoodItem schema object."""
-    qty_g = portion_nutrition.get("quantity_g", 200.0)
+    qty_g = float(portion_nutrition.get("quantity_g", 200.0))
     qty_servings = round2(qty_g / 200.0)
 
+    from app.recommendation.meal_suitability import (
+        construct_display_identity,
+        get_food_family,
+        get_data_quality_status,
+    )
+
+    rname = str(food_dict.get("recipe_name", "Unknown"))
+    disp_name = str(food_dict.get("display_name", construct_display_identity(food_dict)))
+    fam = str(food_dict.get("food_family", get_food_family(rname)))
+    qual = str(food_dict.get("data_quality_status", get_data_quality_status(food_dict)))
+
     return FoodItem(
-        name              = str(food_dict.get("recipe_name", "Unknown")),
+        name              = rname,
+        display_name      = disp_name,
         recipe_id         = str(food_dict.get("recipe_id", "")),
+        food_id           = str(food_dict.get("food_id", food_dict.get("recipe_id", ""))),
+        food_family       = fam,
         quantity_servings = qty_servings,
         quantity_g        = qty_g,
+        nutrition         = {
+            "calories":   portion_nutrition.get("calories", 0.0),
+            "protein_g":  portion_nutrition.get("protein_g", 0.0),
+            "carbs_g":    portion_nutrition.get("carbs_g", 0.0),
+            "fat_g":      portion_nutrition.get("fat_g", 0.0),
+            "fiber_g":    portion_nutrition.get("fiber_g", 0.0),
+        },
         calories          = portion_nutrition.get("calories", 0.0),
         protein_g         = portion_nutrition.get("protein_g", 0.0),
         carbs_g           = portion_nutrition.get("carbs_g", 0.0),
@@ -72,6 +94,9 @@ def _build_food_item(
         meal_slot         = slot,
         suitability_score = round2(suitability_score),
         why_recommended   = why_text,
+        reasons           = reasons or [],
+        validation_status = "PASS",
+        data_quality_status = qual,
         is_vegetarian     = bool(food_dict.get("is_vegetarian", False)),
         cuisine           = str(food_dict.get("cuisine", "")),
     )
@@ -188,8 +213,9 @@ def generate_diet_plan(patient: PatientInput) -> DietResponse:
             portion_nut = slot_data["portion_nutrition"]
             suit_score  = slot_data.get("suitability_score", 0.8)
 
-            # Generate mathematical explanation
-            why_text = generate_food_explanation(
+            # Generate mathematical explanation with structured reasons (Fixes 9, 10, 11)
+            from app.recommendation.explanation import generate_structured_food_reasons
+            reasons, why_text = generate_structured_food_reasons(
                 portion_nutrition = portion_nut,
                 daily_targets     = targets_dict,
                 meal_slot         = slot,
@@ -197,7 +223,7 @@ def generate_diet_plan(patient: PatientInput) -> DietResponse:
                 is_vegetarian     = bool(food_dict.get("is_vegetarian", True)),
             )
 
-            food_item = _build_food_item(food_dict, portion_nut, slot, suit_score, why_text)
+            food_item = _build_food_item(food_dict, portion_nut, slot, suit_score, why_text, reasons)
 
             meal_total = MealTotal(
                 calories  = portion_nut.get("calories", 0.0),

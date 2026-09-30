@@ -97,10 +97,12 @@ def filter_foods(
     if meal_slot:
         target_slot = meal_slot.lower().strip()
         if "allowed_slots" in result.columns:
-            result = result[result["allowed_slots"].apply(lambda s: target_slot in s)]
+            result = result[result["allowed_slots"].apply(lambda s: target_slot in s)].copy()
+            result["meal_slot"] = target_slot
         else:
             allowed_slots = SLOT_TO_MEAL_TYPES.get(target_slot, {target_slot})
-            result = result[result["meal_slot"].isin(allowed_slots)]
+            result = result[result["meal_slot"].isin(allowed_slots)].copy()
+            result["meal_slot"] = target_slot
 
     # ── 5. Budget per meal ────────────────────────────────────────────────────
     if budget_per_meal is not None and budget_per_meal > 0:

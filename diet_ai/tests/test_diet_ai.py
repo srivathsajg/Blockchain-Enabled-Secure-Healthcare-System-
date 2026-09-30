@@ -28,6 +28,7 @@ from app.data.loader import load_food_dataframe
 from app.rules import apply_medical_rules
 from app.recommendation.food_filter import filter_foods
 from app.ml.feature_engineering import engineer_features
+from app.recommendation.engine import generate_diet_plan
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -418,3 +419,105 @@ def test_portion_nutrition_formula(food_df):
 
     # 250g should have exactly 2.5x the calories of 100g
     assert abs(portion_250g["calories"] - portion_100g["calories"] * 2.5) < 0.05
+
+
+def test_optimizer_quantities_are_discrete():
+    """Fix 1 & Fix 13: Solver quantities must strictly be discrete multiples of 10g."""
+    patient = PatientInput(
+        age=30, gender="male", height_cm=175.0, weight_kg=75.0,
+        activity_level="moderate", goal="general_wellness", meals_per_day=4
+    )
+    resp = generate_diet_plan(patient)
+    assert resp.status in ("success", "partial")
+    for meal in resp.meals:
+        for food in meal.foods:
+            assert food.quantity_g % 10.0 == 0.0, f"Quantity {food.quantity_g} is not a multiple of 10g"
+            assert food.quantity_g >= 80.0
+            assert food.quantity_g <= 420.0
+
+
+def test_exact_portion_consistency_math():
+    """Fix 2 & Fix 3: Every displayed nutrient must exactly equal density * (quantity_g / 100)."""
+    df = load_food_dataframe()
+    patient = PatientInput(
+        age=28, gender="female", height_cm=165.0, weight_kg=60.0,
+        activity_level="moderate", goal="general_wellness", meals_per_day=4
+    )
+    resp = generate_diet_plan(patient)
+    for meal in resp.meals:
+        for food in meal.foods:
+            # Match with database row
+            match = df[df["recipe_id"] == food.recipe_id]
+            if not match.empty:
+                row = match.iloc[0]
+                expected_cal = row["per100g_calories"] * (food.quantity_g / 100.0)
+                expected_prot = row["per100g_protein_g"] * (food.quantity_g / 100.0)
+                assert abs(food.calories - expected_cal) < 0.1, f"Calorie mismatch: {food.calories} vs {expected_cal}"
+                assert abs(food.protein_g - expected_prot) < 0.1, f"Protein mismatch: {food.protein_g} vs {expected_prot}"
+
+
+def test_strict_food_family_variety():
+    """Fix 6: No duplicate food family (e.g. Biryani twice) across the whole day."""
+    patient = PatientInput(
+        age=35, gender="male", height_cm=178.0, weight_kg=78.0,
+        activity_level="active", goal="general_wellness", meals_per_day=4
+    )
+    resp = generate_diet_plan(patient)
+    from app.recommendation.meal_suitability import get_food_family
+    families = [get_food_family(food.name) for meal in resp.meals for food in meal.foods]
+    assert len(families) == len(set(families)), f"Duplicate food families found: {families}"
+
+
+def test_meal_suitability_rules():
+    """Fix 7 & Fix 8: Heavy main courses must never appear in breakfast or snacks; desserts never in lunch/dinner."""
+    from app.recommendation.meal_suitability import (
+        get_candidate_meal_slots,
+        MAIN_COURSE_KEYWORDS,
+        DESSERT_KEYWORDS,
+        BREAKFAST_KEYWORDS,
+    )
+    # Test Biryani
+    biryani_row = {"recipe_name": "Sindhi Biryani", "category": "Main Course", "meal_type": "Breakfast"}
+    slots = get_candidate_meal_slots(biryani_row)
+    assert "breakfast" not in slots
+    assert "morning_snack" not in slots
+    assert "lunch" in slots or "dinner" in slots
+
+    # Test Chomchom
+    chom_row = {"recipe_name": "Chomchom", "category": "Desserts", "meal_type": "Dinner"}
+    slots_chom = get_candidate_meal_slots(chom_row)
+    assert "dinner" not in slots_chom
+    assert "lunch" not in slots_chom
+    assert "morning_snack" in slots_chom or "evening_snack" in slots_chom
+
+
+def test_explanations_have_exact_percentages_and_numbers():
+    """Fix 9 & Fix 10: Explanations must contain actual numbers and never claim missing nutrients."""
+    patient = PatientInput(
+        age=30, gender="male", height_cm=175.0, weight_kg=75.0,
+        activity_level="moderate", goal="general_wellness", meals_per_day=4
+    )
+    resp = generate_diet_plan(patient)
+    for meal in resp.meals:
+        for food in meal.foods:
+            # Check reasons
+            assert len(food.reasons) > 0
+            assert "%" in food.why_recommended
+            assert "kcal" in food.why_recommended
+            # Should not claim missing nutrients
+            if food.iron_mg <= 0:
+                assert "Rich in iron" not in food.why_recommended
+
+
+def test_validation_status_and_badge():
+    """Fix 4: validation_status is PASS/WARNING and badge is clinically accurate, never CLINICAL FIT."""
+    patient = PatientInput(
+        age=30, gender="male", height_cm=175.0, weight_kg=75.0,
+        activity_level="moderate", goal="general_wellness", meals_per_day=4
+    )
+    resp = generate_diet_plan(patient)
+    assert resp.validation is not None
+    assert resp.validation.validation_status in ("PASS", "WARNING", "PARTIAL")
+    assert resp.validation.badge in ("Within Target", "Constraint Validated", "Partial Validation")
+    assert resp.validation.badge != "CLINICAL FIT"
+

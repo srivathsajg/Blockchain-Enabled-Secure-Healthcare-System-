@@ -83,7 +83,7 @@ const getTrackedDietPlan = async (req, res, next) => {
     const doc = {
       patientId,
       date: today,
-      planVersion: 4,
+      planVersion: 7,
       generatedAt: new Date(),
       meals: prediction.meals,
       targets: prediction.targets,
@@ -105,7 +105,7 @@ const getTrackedDietPlan = async (req, res, next) => {
         ...savedPlan.toObject(),
         userProfile,
         validation: prediction.validation,
-        validationBadge: prediction.validationBadge || "Within Target",
+        validationBadge: prediction.validationBadge || "Nutrition Plan Generated",
         medicalRecord: latestRecord ? {
           diagnosis: latestRecord.diagnosis,
           symptoms: latestRecord.symptoms,
@@ -151,16 +151,22 @@ const refreshTrackedDietPlan = async (req, res, next) => {
       healthSummary: user.healthSummary || {},
     };
 
-    // Remove existing plan for today
+    // Hard-delete today's existing plan so nothing from the old plan can be reused
     await DietPlan.deleteOne({ patientId, date: today });
+    console.log(`[TrackController] Deleted stale plan for patient ${patientId} on ${today}. Regenerating...`);
 
-    // Generate fresh plan
-    const prediction = await generateAITrackedDietPlan(patientId, userProfile, rawIndicators, latestRecord);
+    // Pass a guaranteed-new seed based on the exact time of this request.
+    // This forces the optimizer to shuffle its food candidates differently from any previous call.
+    const regenerationSeed = Date.now();
+
+    const prediction = await generateAITrackedDietPlan(
+      patientId, userProfile, rawIndicators, latestRecord, regenerationSeed
+    );
 
     const doc = {
       patientId,
       date: today,
-      planVersion: 4,
+      planVersion: 7,
       generatedAt: new Date(),
       meals: prediction.meals,
       targets: prediction.targets,
@@ -177,11 +183,13 @@ const refreshTrackedDietPlan = async (req, res, next) => {
 
     return res.json({
       success: true,
+      regenerated: true,
+      seed: regenerationSeed,
       data: {
         ...savedPlan.toObject(),
         userProfile,
         validation: prediction.validation,
-        validationBadge: prediction.validationBadge || "Within Target",
+        validationBadge: prediction.validationBadge || "Nutrition Plan Generated",
         medicalRecord: latestRecord ? {
           diagnosis: latestRecord.diagnosis,
           symptoms: latestRecord.symptoms,

@@ -56,30 +56,28 @@ def explain_food_row(feature_row: pd.Series, shap_values: np.ndarray = None) -> 
         except Exception:
             pass
 
-    # Rule-based fallback explanations
+    # Verified rule-based explanations using actual food nutrient values
     if not reasons:
-        cs = feature_row.get("calorie_gap_score", 0.5)
-        ps = feature_row.get("protein_gap_score", 0.5)
-        fs = feature_row.get("fiber_gap_score", 0.5)
-        is_ = feature_row.get("iron_gap_score", 0.5)
-        sp = feature_row.get("sodium_penalty", 0.0)
+        food_cal = float(feature_row.get("food_calories", 0))
+        food_prot = float(feature_row.get("food_protein_g", 0))
+        food_fiber = float(feature_row.get("food_fiber_g", 0))
+        food_iron = float(feature_row.get("food_iron_mg", 0))
+        food_sodium = float(feature_row.get("food_sodium_mg", 0))
 
-        if cs >= 0.6:
-            reasons.append("Good calorie fit for your daily targets")
-        if ps >= 0.6:
-            reasons.append("Strong protein content aligned with your goal")
-        if fs >= 0.6:
-            reasons.append("High dietary fibre to support digestion")
-        if is_ >= 0.6:
-            reasons.append("Rich iron content for nutritional balance")
-        if sp == 0.0:
-            reasons.append("Low sodium level, heart-friendly choice")
+        if food_cal > 0:
+            reasons.append(f"Provides {round(food_cal)} kcal calibrated for energy balance")
+        if food_prot >= 4.0:
+            reasons.append(f"Supplies {round(food_prot, 1)} g protein for cellular repair")
+        if food_fiber >= 3.0:
+            reasons.append(f"Contains {round(food_fiber, 1)} g dietary fiber for metabolic health")
+        if food_iron >= 2.0:
+            reasons.append(f"Delivers {round(food_iron, 1)} mg iron for blood health")
+        if food_sodium <= 400:
+            reasons.append("Controlled sodium level supporting cardiovascular health")
         if feature_row.get("diet_compat", 0) == 1.0:
-            reasons.append("Matches your dietary preference")
-        if feature_row.get("cuisine_compat", 0) == 1.0:
-            reasons.append("Aligns with your preferred cuisine")
+            reasons.append("Adheres strictly to your dietary preference")
 
     if not reasons:
-        reasons = ["Well-balanced nutritional profile for your plan"]
+        reasons = ["Nutritionally calibrated selection matching your profile"]
 
     return " | ".join(reasons[:3])

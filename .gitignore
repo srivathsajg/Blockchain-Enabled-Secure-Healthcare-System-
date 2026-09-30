@@ -74,6 +74,7 @@ ai_diet_model/diet_ml_model.pkl
 # Large trained ML models
 *.pkl
 **/*.pkl
+*.traineddata
 
 # Large dataset
 Dataset/Drug Labels Dataset.csv
